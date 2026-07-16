@@ -895,6 +895,7 @@ fn config_toml_deserializes_model_availability_nux() {
             show_tooltips: true,
             vim_mode_default: false,
             raw_output_mode: false,
+            full_transparency: false,
             alternate_screen: AltScreenMode::default(),
             status_line: None,
             status_line_use_colors: true,
@@ -1053,6 +1054,24 @@ async fn runtime_config_uses_tui_raw_output_mode() {
     .expect("load config");
 
     assert!(cfg.tui_raw_output_mode);
+}
+
+#[tokio::test]
+async fn runtime_config_uses_tui_full_transparency() {
+    let toml = r#"
+        [tui]
+        full_transparency = true
+    "#;
+    let cfg_toml: ConfigToml = toml::from_str(toml).expect("deserialize full_transparency=true");
+    let cfg = Config::load_from_base_config_with_overrides(
+        cfg_toml,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert!(cfg.tui_full_transparency);
 }
 
 #[test]
@@ -3734,6 +3753,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             show_tooltips: true,
             vim_mode_default: false,
             raw_output_mode: false,
+            full_transparency: false,
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
             status_line_use_colors: true,

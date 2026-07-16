@@ -127,6 +127,14 @@ pub fn status_line_use_colors_edit(enabled: bool) -> ConfigEdit {
     }
 }
 
+/// Produces a config edit that sets `[tui].full_transparency`.
+pub fn full_transparency_edit(enabled: bool) -> ConfigEdit {
+    ConfigEdit::SetPath {
+        segments: vec!["tui".to_string(), "full_transparency".to_string()],
+        value: value(enabled),
+    }
+}
+
 /// Produces a config edit that sets `[tui].terminal_title` to an explicit ordered list.
 ///
 /// The array is written even when it is empty so "disabled title updates" stays

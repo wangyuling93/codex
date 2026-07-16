@@ -866,7 +866,7 @@ async fn replay_thread_snapshot_in_progress_turn_restores_running_state_without_
         /*resume_restored_queue*/ false,
     );
 
-    assert!(app.chat_widget.is_task_running_for_test());
+    assert!(app.chat_widget.is_user_turn_pending_or_running());
 }
 
 #[tokio::test]

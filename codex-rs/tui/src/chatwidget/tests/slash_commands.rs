@@ -2868,6 +2868,127 @@ async fn raw_slash_command_reports_usage_for_invalid_arg() {
 }
 
 #[tokio::test]
+async fn transparent_service_tier_collision_dispatches_through_composer() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    let tier = preset.service_tiers.first_mut().expect("service tier");
+    tier.id = "transparent-tier".to_string();
+    tier.name = "transparent".to_string();
+    tier.description = "catalog-provided transparent tier".to_string();
+    preset.service_tiers.truncate(1);
+    chat.model_catalog = std::sync::Arc::new(ModelCatalog::new(vec![preset]));
+    chat.set_feature_enabled(Feature::FastMode, /*enabled*/ true);
+    chat.sync_service_tier_commands();
+
+    submit_composer_text(&mut chat, "/transparent");
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(chat.current_service_tier(), Some("transparent-tier"));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AppEvent::PersistServiceTierSelection {
+            service_tier: Some(service_tier),
+        } if service_tier == "transparent-tier"
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::SetFullTransparency { .. }))
+    );
+
+    submit_composer_text(&mut chat, "/transparent on");
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AppEvent::SetFullTransparency { enabled: true }))
+    );
+}
+
+#[tokio::test]
+async fn transparent_slash_command_toggles_and_accepts_on_off_args() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::Transparent);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetFullTransparency { enabled: true })
+    ));
+
+    chat.set_full_transparency(/*enabled*/ true);
+    chat.dispatch_command(SlashCommand::Transparent);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetFullTransparency { enabled: false })
+    ));
+
+    chat.dispatch_command_with_args(SlashCommand::Transparent, "off".to_string(), Vec::new());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetFullTransparency { enabled: false })
+    ));
+
+    chat.dispatch_command_with_args(SlashCommand::Transparent, "on".to_string(), Vec::new());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetFullTransparency { enabled: true })
+    ));
+}
+
+#[tokio::test]
+async fn transparent_slash_command_is_disabled_while_task_running() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.input_queue.user_turn_pending_start = true;
+
+    chat.dispatch_command(SlashCommand::Transparent);
+
+    chat.input_queue.user_turn_pending_start = false;
+    chat.bottom_pane.set_task_running(/*running*/ true);
+    chat.dispatch_command_with_args(SlashCommand::Transparent, "off".to_string(), Vec::new());
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(events.len(), 2);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AppEvent::SetFullTransparency { .. }))
+    );
+    let rendered = events
+        .into_iter()
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.display_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "transparent_slash_command_is_disabled_while_task_running",
+        rendered
+    );
+}
+
+#[tokio::test]
+async fn transparent_slash_command_reports_usage_for_invalid_arg_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Transparent, "status".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "transparent_slash_command_reports_usage_for_invalid_arg",
+        rendered
+    );
+}
+
+#[tokio::test]
 async fn compact_queues_user_messages_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

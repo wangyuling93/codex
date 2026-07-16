@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: rendered
+---
+■ '/transparent' is disabled while a task is in progress.
+
+■ '/transparent' is disabled while a task is in progress.

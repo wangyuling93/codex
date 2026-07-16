@@ -11,6 +11,7 @@ use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
+use crate::bottom_pane::slash_commands::find_bare_slash_command;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
 use crate::goal_files::GoalDraft;
@@ -36,6 +37,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
+const TRANSPARENT_USAGE: &str = "Usage: /transparent [on|off]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
@@ -131,8 +133,15 @@ impl ChatWidget {
             .send(AppEvent::RawOutputModeChanged { enabled });
     }
 
+    fn request_full_transparency(&self, enabled: bool) {
+        self.app_event_tx
+            .send(AppEvent::SetFullTransparency { enabled });
+    }
+
     fn slash_command_blocked_by_active_task(&self, cmd: SlashCommand) -> bool {
-        (!cmd.available_during_task() && self.bottom_pane.is_task_running())
+        let task_blocks_command = self.bottom_pane.is_task_running()
+            || (cmd == SlashCommand::Transparent && self.input_queue.user_turn_pending_start);
+        (!cmd.available_during_task() && task_blocks_command)
             || (cmd == SlashCommand::Resume
                 && (self.input_queue.user_turn_pending_start
                     || self.turn_lifecycle.agent_turn_running))
@@ -388,6 +397,9 @@ impl ChatWidget {
             SlashCommand::Raw => {
                 let enabled = self.toggle_raw_output_mode_and_notify();
                 self.emit_raw_output_mode_changed(enabled);
+            }
+            SlashCommand::Transparent => {
+                self.request_full_transparency(!self.config.tui_full_transparency);
             }
             SlashCommand::Diff => {
                 self.add_diff_in_progress();
@@ -709,6 +721,11 @@ impl ChatWidget {
                 }
                 _ => self.add_error_message(RAW_USAGE.to_string()),
             },
+            SlashCommand::Transparent => match trimmed.to_ascii_lowercase().as_str() {
+                "on" => self.request_full_transparency(/*enabled*/ true),
+                "off" => self.request_full_transparency(/*enabled*/ false),
+                _ => self.add_error_message(TRANSPARENT_USAGE.to_string()),
+            },
             SlashCommand::Rename if !trimmed.is_empty() => {
                 if !self.ensure_thread_rename_allowed() {
                     return;
@@ -936,9 +953,12 @@ impl ChatWidget {
         }
 
         let service_tier_commands = self.current_model_service_tier_commands();
-        let Some(command) =
+        let command = if rest.is_empty() {
+            find_bare_slash_command(name, self.builtin_command_flags(), &service_tier_commands)
+        } else {
             find_slash_command(name, self.builtin_command_flags(), &service_tier_commands)
-        else {
+        };
+        let Some(command) = command else {
             self.add_info_message(
                 format!(
                     r#"Unrecognized command '/{name}'. Type "/" for a list of supported commands."#
@@ -1076,6 +1096,7 @@ impl ChatWidget {
             | SlashCommand::Side
             | SlashCommand::Btw
             | SlashCommand::Keymap
+            | SlashCommand::Transparent
             | SlashCommand::Agent
             | SlashCommand::MultiAgents
             | SlashCommand::Permissions

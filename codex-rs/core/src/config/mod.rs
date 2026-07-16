@@ -753,6 +753,9 @@ pub struct Config {
     /// Start the TUI in raw scrollback mode for copy-friendly transcript output.
     pub tui_raw_output_mode: bool,
 
+    /// Render every TUI cell with the terminal's default background.
+    pub tui_full_transparency: bool,
+
     /// Start the TUI in the specified collaboration mode (plan/default).
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
@@ -4055,6 +4058,11 @@ impl Config {
                 .tui
                 .as_ref()
                 .map(|t| t.raw_output_mode)
+                .unwrap_or(false),
+            tui_full_transparency: cfg
+                .tui
+                .as_ref()
+                .map(|t| t.full_transparency)
                 .unwrap_or(false),
             tui_alternate_screen: cfg
                 .tui

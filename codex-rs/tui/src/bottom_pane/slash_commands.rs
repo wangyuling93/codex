@@ -134,16 +134,40 @@ pub(crate) fn find_slash_command(
         return Some(SlashCommandItem::Builtin(cmd));
     }
 
-    let tiers_enabled = flags.service_tier_commands_enabled;
-    tiers_enabled
-        .then(|| {
-            service_tier_commands
-                .iter()
-                .find(|command| command.name == name)
-                .cloned()
-                .map(SlashCommandItem::ServiceTier)
-        })
-        .flatten()
+    find_service_tier_command(name, flags, service_tier_commands)
+}
+
+/// Find a command entered without arguments while preserving existing dynamic command names.
+///
+/// Model-provided service tiers predate the `/transparent` built-in and their names are not
+/// reserved. Keep a bare tier named `transparent` working; the built-in remains addressable with
+/// `/transparent on|off` and through its popup entry.
+pub(crate) fn find_bare_slash_command(
+    name: &str,
+    flags: BuiltinCommandFlags,
+    service_tier_commands: &[ServiceTierCommand],
+) -> Option<SlashCommandItem> {
+    if name == SlashCommand::Transparent.command()
+        && let Some(command) = find_service_tier_command(name, flags, service_tier_commands)
+    {
+        return Some(command);
+    }
+
+    find_slash_command(name, flags, service_tier_commands)
+}
+
+fn find_service_tier_command(
+    name: &str,
+    flags: BuiltinCommandFlags,
+    service_tier_commands: &[ServiceTierCommand],
+) -> Option<SlashCommandItem> {
+    flags.service_tier_commands_enabled.then(|| {
+        service_tier_commands
+            .iter()
+            .find(|command| command.name == name)
+            .cloned()
+            .map(SlashCommandItem::ServiceTier)
+    })?
 }
 
 pub(crate) fn has_slash_command_prefix(
@@ -225,6 +249,25 @@ mod tests {
         }];
 
         assert_eq!(find_slash_command("fast", flags, &commands), None);
+    }
+
+    #[test]
+    fn bare_transparent_preserves_colliding_service_tier_command() {
+        let command = ServiceTierCommand {
+            id: "transparent-tier".to_string(),
+            name: "transparent".to_string(),
+            description: "catalog-provided transparent tier".to_string(),
+        };
+        let flags = all_enabled_flags();
+
+        assert_eq!(
+            find_bare_slash_command("transparent", flags, from_ref(&command)),
+            Some(SlashCommandItem::ServiceTier(command.clone()))
+        );
+        assert_eq!(
+            find_slash_command("transparent", flags, from_ref(&command)),
+            Some(SlashCommandItem::Builtin(SlashCommand::Transparent))
+        );
     }
 
     #[test]

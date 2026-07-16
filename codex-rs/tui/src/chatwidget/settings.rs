@@ -252,6 +252,11 @@ impl ChatWidget {
         self.config.tui_theme = theme;
     }
 
+    /// Set the full-transparency preference in the widget's config copy.
+    pub(crate) fn set_full_transparency(&mut self, enabled: bool) {
+        self.config.tui_full_transparency = enabled;
+    }
+
     /// Set the model in the widget's config copy and stored collaboration mode.
     pub(crate) fn set_model(&mut self, model: &str) {
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(

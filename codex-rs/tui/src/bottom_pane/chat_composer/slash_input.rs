@@ -13,6 +13,7 @@ use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
+use crate::bottom_pane::slash_commands::find_bare_slash_command;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::bottom_pane::slash_commands::has_slash_command_prefix;
 use crate::slash_command::SlashCommand;
@@ -94,7 +95,8 @@ impl<'a> SlashInput<'a> {
         if !rest.is_empty() {
             return None;
         }
-        let command = self.command(name)?;
+        let command =
+            find_bare_slash_command(name, self.command_flags, self.service_tier_commands)?;
         if command.supports_inline_args()
             && parse_slash_name(text).is_some_and(|(_, full_rest, _)| !full_rest.is_empty())
         {

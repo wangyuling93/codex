@@ -1234,6 +1234,10 @@ pub async fn run_main(
     .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
+fn apply_startup_full_transparency(tui: &mut Tui, config: &Config) {
+    tui.set_full_transparency(config.tui_full_transparency);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_ratatui_app(
     cli: Cli,
@@ -1274,6 +1278,7 @@ async fn run_ratatui_app(
         initialized_terminal.enhanced_keys_supported,
         initialized_terminal.stderr_guard,
     );
+    apply_startup_full_transparency(&mut tui, &initial_config);
     let mut terminal_restore_guard = TerminalRestoreGuard::new();
 
     #[cfg(not(debug_assertions))]
@@ -1647,6 +1652,7 @@ async fn run_ratatui_app(
     ) {
         config.startup_warnings.push(w);
     }
+    apply_startup_full_transparency(&mut tui, &config);
 
     set_default_client_residency_requirement(config.enforce_residency.value());
     let should_show_trust_screen = should_show_trust_screen(&config);
@@ -3050,6 +3056,23 @@ trust_level = "untrusted"
             config.startup_warnings[0].contains("bogus-theme"),
             "warning should reference the final config's theme name"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_startup_config_replaces_initial_full_transparency() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut initial_config = build_config(&temp_dir).await?;
+        initial_config.tui_full_transparency = true;
+        let mut final_config = initial_config.clone();
+        final_config.tui_full_transparency = false;
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+
+        apply_startup_full_transparency(&mut tui, &initial_config);
+        assert!(tui.terminal.full_transparency());
+
+        apply_startup_full_transparency(&mut tui, &final_config);
+        assert!(!tui.terminal.full_transparency());
         Ok(())
     }
 }

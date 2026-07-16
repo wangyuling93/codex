@@ -608,6 +608,11 @@ impl Tui {
         self.alt_screen_enabled = enabled;
     }
 
+    pub fn set_full_transparency(&mut self, enabled: bool) {
+        self.terminal.set_full_transparency(enabled);
+        self.frame_requester.schedule_frame();
+    }
+
     pub fn set_notification_settings(
         &mut self,
         method: NotificationMethod,

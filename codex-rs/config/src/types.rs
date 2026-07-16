@@ -708,6 +708,13 @@ pub struct Tui {
     #[serde(default)]
     pub raw_output_mode: bool,
 
+    /// Render every TUI cell with the terminal's default background.
+    ///
+    /// This allows terminals with transparent backgrounds to keep the entire TUI transparent,
+    /// including the composer input. Defaults to `false`.
+    #[serde(default)]
+    pub full_transparency: bool,
+
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
     /// - `auto` (default): Use alternate screen.

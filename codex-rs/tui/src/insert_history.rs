@@ -56,6 +56,12 @@ pub(crate) enum InsertHistoryMode {
     ZellijRaw,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryBackgroundMode {
+    Preserve,
+    Transparent,
+}
+
 /// Insert `lines` above the viewport using the terminal's backend writer
 /// (avoids direct stdout references).
 pub fn insert_history_lines<B>(
@@ -111,6 +117,11 @@ where
     B: Backend + Write,
 {
     let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
+    let background_mode = if terminal.full_transparency() {
+        HistoryBackgroundMode::Transparent
+    } else {
+        HistoryBackgroundMode::Preserve
+    };
 
     let mut area = terminal.viewport_area;
     let mut should_update_area = false;
@@ -170,7 +181,7 @@ where
                 if index > 0 {
                     queue!(writer, Print("\r\n"))?;
                 }
-                write_history_line(writer, line, wrap_width)?;
+                write_history_line(writer, line, wrap_width, background_mode)?;
             }
 
             // Writing raw source text through the terminal preserves its soft-wrap metadata.
@@ -237,7 +248,7 @@ where
 
             for line in &wrapped {
                 queue!(writer, Print("\r\n"))?;
-                write_history_line(writer, line, wrap_width)?;
+                write_history_line(writer, line, wrap_width, background_mode)?;
             }
 
             queue!(writer, ResetScrollRegion)?;
@@ -283,6 +294,7 @@ fn write_history_line<W: Write>(
     writer: &mut W,
     line: &HyperlinkLine,
     wrap_width: usize,
+    background_mode: HistoryBackgroundMode,
 ) -> io::Result<()> {
     let physical_rows = line.width().max(1).div_ceil(wrap_width) as u16;
     if physical_rows > 1 {
@@ -293,6 +305,10 @@ fn write_history_line<W: Write>(
         }
         queue!(writer, RestorePosition)?;
     }
+    let line_background = match background_mode {
+        HistoryBackgroundMode::Preserve => line.line.style.bg.unwrap_or(Color::Reset),
+        HistoryBackgroundMode::Transparent => Color::Reset,
+    };
     queue!(
         writer,
         SetColors(Colors::new(
@@ -301,11 +317,7 @@ fn write_history_line<W: Write>(
                 .fg
                 .map(std::convert::Into::into)
                 .unwrap_or(CColor::Reset),
-            line.line
-                .style
-                .bg
-                .map(std::convert::Into::into)
-                .unwrap_or(CColor::Reset)
+            line_background.into()
         ))
     )?;
     queue!(writer, Clear(ClearType::UntilNewLine))?;
@@ -325,7 +337,7 @@ fn write_history_line<W: Write>(
         hyperlinks: line.hyperlinks.clone(),
     };
     let decorated = decorate_spans(&merged_line);
-    write_spans(writer, decorated.iter())
+    write_spans(writer, decorated.iter(), background_mode)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,7 +447,11 @@ impl ModifierDiff {
     }
 }
 
-fn write_spans<'a, I>(mut writer: &mut impl Write, content: I) -> io::Result<()>
+fn write_spans<'a, I>(
+    mut writer: &mut impl Write,
+    content: I,
+    background_mode: HistoryBackgroundMode,
+) -> io::Result<()>
 where
     I: IntoIterator<Item = &'a Span<'a>>,
 {
@@ -446,6 +462,9 @@ where
         let mut modifier = Modifier::empty();
         modifier.insert(span.style.add_modifier);
         modifier.remove(span.style.sub_modifier);
+        if background_mode == HistoryBackgroundMode::Transparent {
+            modifier = crate::custom_terminal::modifier_for_transparent_background(modifier);
+        }
         if modifier != last_modifier {
             let diff = ModifierDiff {
                 from: last_modifier,
@@ -455,7 +474,10 @@ where
             last_modifier = modifier;
         }
         let next_fg = span.style.fg.unwrap_or(Color::Reset);
-        let next_bg = span.style.bg.unwrap_or(Color::Reset);
+        let next_bg = match background_mode {
+            HistoryBackgroundMode::Preserve => span.style.bg.unwrap_or(Color::Reset),
+            HistoryBackgroundMode::Transparent => Color::Reset,
+        };
         if next_fg != fg || next_bg != bg {
             queue!(
                 writer,
@@ -483,6 +505,7 @@ mod tests {
     use crate::test_backend::VT100Backend;
     use ratatui::layout::Rect;
     use ratatui::style::Color;
+    use ratatui::style::Style;
 
     #[test]
     fn writes_bold_then_regular_spans() {
@@ -491,7 +514,7 @@ mod tests {
         let spans = ["A".bold(), "B".into()];
 
         let mut actual: Vec<u8> = Vec::new();
-        write_spans(&mut actual, spans.iter()).unwrap();
+        write_spans(&mut actual, spans.iter(), HistoryBackgroundMode::Preserve).unwrap();
 
         let mut expected: Vec<u8> = Vec::new();
         queue!(
@@ -513,12 +536,100 @@ mod tests {
     }
 
     #[test]
+    fn transparent_history_insertion_resets_backgrounds_and_remaps_reverse() {
+        let width = 20;
+        let height = 4;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal =
+            crate::custom_terminal::Terminal::with_options(backend).expect("history terminal");
+        terminal.set_viewport_area(Rect::new(0, height - 1, width, 1));
+        terminal.set_full_transparency(/*enabled*/ true);
+        let line = Line::from(Span::styled(
+            "A",
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::Red)
+                .add_modifier(Modifier::REVERSED),
+        ))
+        .style(Style::default().bg(Color::Blue));
+
+        insert_history_lines(&mut terminal, vec![line]).expect("insert transparent history");
+
+        let screen = terminal.backend().vt100().screen();
+        let row = (0..height)
+            .find(|row| {
+                screen
+                    .cell(*row, /*col*/ 0)
+                    .is_some_and(|cell| cell.contents() == "A")
+            })
+            .expect("history row containing A");
+        for column in 0..width {
+            assert_eq!(
+                screen
+                    .cell(row, column)
+                    .expect("transparent history screen cell")
+                    .bgcolor(),
+                vt100::Color::Default
+            );
+        }
+        let styled_cell = screen.cell(row, /*col*/ 0).expect("styled history cell");
+        assert!(!styled_cell.inverse());
+        assert!(styled_cell.underline());
+    }
+
+    #[test]
+    fn opaque_history_insertion_preserves_backgrounds_and_reverse() {
+        let width = 20;
+        let height = 4;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal =
+            crate::custom_terminal::Terminal::with_options(backend).expect("history terminal");
+        terminal.set_viewport_area(Rect::new(0, height - 1, width, 1));
+        let line = Line::from(Span::styled(
+            "A",
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::Red)
+                .add_modifier(Modifier::REVERSED),
+        ))
+        .style(Style::default().bg(Color::Blue));
+
+        insert_history_lines(&mut terminal, vec![line]).expect("insert opaque history");
+
+        let screen = terminal.backend().vt100().screen();
+        let row = (0..height)
+            .find(|row| {
+                screen
+                    .cell(*row, /*col*/ 0)
+                    .is_some_and(|cell| cell.contents() == "A")
+            })
+            .expect("history row containing A");
+        let styled_cell = screen.cell(row, /*col*/ 0).expect("styled history cell");
+        assert_ne!(styled_cell.bgcolor(), vt100::Color::Default);
+        assert!(styled_cell.inverse());
+        assert!(!styled_cell.underline());
+        assert_ne!(
+            screen
+                .cell(row, /*col*/ 1)
+                .expect("line background cell")
+                .bgcolor(),
+            vt100::Color::Default
+        );
+    }
+
+    #[test]
     fn writes_semantic_web_link_without_changing_visible_text() {
         let destination = "https://example.com/long/path";
         let line = crate::terminal_hyperlinks::annotate_web_urls_in_line(Line::from(destination));
         let mut actual = Vec::new();
 
-        write_history_line(&mut actual, &line, /*wrap_width*/ 80).expect("write history line");
+        write_history_line(
+            &mut actual,
+            &line,
+            /*wrap_width*/ 80,
+            HistoryBackgroundMode::Preserve,
+        )
+        .expect("write history line");
 
         let output = String::from_utf8(actual).expect("UTF-8 terminal output");
         assert!(output.contains("\x1b]8;;https://example.com/long/path\x07"));

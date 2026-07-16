@@ -1,4 +1,12 @@
 //! Ghostty terminal palettes adapted to Codex's ANSI syntax theme.
+//!
+//! Palette inventory is embedded as tab-separated data (`ghostty_themes.tsv`).
+//! Regenerate with `scripts/generate_ghostty_themes_tsv.py` (see that script's
+//! header for the upstream source pin).
+//!
+//! Each palette is applied by cloning the two-face `Ansi` theme and rewriting
+//! ANSI alpha-encoded colors to opaque RGB. Resolved themes are cached so
+//! picker preview can scroll without rebuilding on every selection.
 
 use std::sync::OnceLock;
 
@@ -6,10 +14,12 @@ use syntect::highlighting::Color;
 use syntect::highlighting::Theme;
 use two_face::theme::EmbeddedThemeName;
 
+use super::ansi_theme_encoding::ANSI_ALPHA_DEFAULT;
+use super::ansi_theme_encoding::ANSI_ALPHA_INDEX;
+use super::ansi_theme_encoding::OPAQUE_ALPHA;
+
 const GHOSTTY_THEME_DATA: &str = include_str!("ghostty_themes.tsv");
-const ANSI_ALPHA_INDEX: u8 = 0x00;
-const ANSI_ALPHA_DEFAULT: u8 = 0x01;
-const OPAQUE_ALPHA: u8 = 0xFF;
+const GHOSTTY_NAME_PREFIX: &str = "ghostty-";
 
 type Rgb = [u8; 3];
 
@@ -18,6 +28,8 @@ struct GhosttyTheme {
     background: Rgb,
     foreground: Rgb,
     palette: [Rgb; 16],
+    /// Lazily materialised syntect theme; shared across resolve calls.
+    resolved: OnceLock<Theme>,
 }
 
 static GHOSTTY_THEMES: OnceLock<Vec<GhosttyTheme>> = OnceLock::new();
@@ -33,6 +45,10 @@ fn themes() -> &'static [GhosttyTheme] {
                     let name = fields
                         .next()
                         .unwrap_or_else(|| panic!("Ghostty theme row has no name: {line}"));
+                    assert!(
+                        name.starts_with(GHOSTTY_NAME_PREFIX),
+                        "Ghostty theme name must start with {GHOSTTY_NAME_PREFIX}: {name}"
+                    );
                     let background = parse_rgb(
                         fields
                             .next()
@@ -63,9 +79,12 @@ fn themes() -> &'static [GhosttyTheme] {
                         background,
                         foreground,
                         palette,
+                        resolved: OnceLock::new(),
                     }
                 })
                 .collect();
+            // Catalog is expected to ship pre-sorted; sort defensively so binary
+            // search stays correct if a hand-edit disorders a row.
             themes.sort_by(|left, right| left.name.cmp(&right.name));
             themes
         })
@@ -84,6 +103,9 @@ fn parse_rgb(value: &str) -> Option<Rgb> {
 }
 
 fn find(name: &str) -> Option<&'static GhosttyTheme> {
+    if !name.starts_with(GHOSTTY_NAME_PREFIX) {
+        return None;
+    }
     let themes = themes();
     themes
         .binary_search_by(|theme| theme.name.as_str().cmp(name))
@@ -101,6 +123,15 @@ pub(super) fn contains(name: &str) -> bool {
 
 pub(super) fn resolve(name: &str) -> Option<Theme> {
     let definition = find(name)?;
+    Some(
+        definition
+            .resolved
+            .get_or_init(|| build_theme(definition))
+            .clone(),
+    )
+}
+
+fn build_theme(definition: &GhosttyTheme) -> Theme {
     let mut theme = two_face::theme::extra()
         .get(EmbeddedThemeName::Ansi)
         .clone();
@@ -117,7 +148,7 @@ pub(super) fn resolve(name: &str) -> Option<Theme> {
             .background
             .map(|color| resolve_ansi_color(color, definition.background, &definition.palette));
     }
-    Some(theme)
+    theme
 }
 
 fn resolve_ansi_color(color: Color, default: Rgb, palette: &[Rgb; 16]) -> Color {

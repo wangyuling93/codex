@@ -1,8 +1,11 @@
 //! Syntax highlighting engine for the TUI.
 //!
 //! Wraps [syntect] with the [two_face] grammar and theme bundles to provide
-//! ~250-language syntax highlighting and hundreds of bundled color themes.  The module
-//! owns four process-global singletons:
+//! ~250-language syntax highlighting and hundreds of bundled color themes.
+//! Theme discovery and resolution live in [`super::theme_catalog`]; this
+//! module owns the active-theme runtime and highlighting entry points.
+//!
+//! Process-global singletons:
 //!
 //! | Singleton | Type | Purpose |
 //! |---|---|---|
@@ -26,7 +29,6 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -36,14 +38,21 @@ use syntect::highlighting::FontStyle;
 use syntect::highlighting::Highlighter;
 use syntect::highlighting::Style as SyntectStyle;
 use syntect::highlighting::Theme;
-use syntect::highlighting::ThemeSet;
 use syntect::parsing::Scope;
 use syntect::parsing::SyntaxReference;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-use two_face::theme::EmbeddedThemeName;
 
-use super::ghostty_themes;
+use super::ansi_theme_encoding::ANSI_ALPHA_DEFAULT;
+use super::ansi_theme_encoding::ANSI_ALPHA_INDEX;
+use super::ansi_theme_encoding::OPAQUE_ALPHA;
+use super::theme_catalog;
+
+// Re-export catalog API so existing `highlight::` call sites stay stable.
+pub(crate) use super::theme_catalog::adaptive_default_theme_name;
+pub(crate) use super::theme_catalog::list_available_themes;
+pub(crate) use super::theme_catalog::resolve_theme_by_name;
+pub(crate) use super::theme_catalog::validate_theme_name;
 
 // -- Global singletons -------------------------------------------------------
 
@@ -51,12 +60,6 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<RwLock<Theme>> = OnceLock::new();
 static THEME_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
 static CODEX_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
-
-// Syntect/bat encode ANSI palette semantics in alpha:
-// `a=0` => indexed ANSI palette via RGB payload, `a=1` => terminal default.
-const ANSI_ALPHA_INDEX: u8 = 0x00;
-const ANSI_ALPHA_DEFAULT: u8 = 0x01;
-const OPAQUE_ALPHA: u8 = 0xFF;
 
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
@@ -88,7 +91,7 @@ pub(crate) fn set_theme_override(
     let override_set_ok = THEME_OVERRIDE.set(name.clone()).is_ok();
     let codex_home_set_ok = CODEX_HOME.set(codex_home.clone()).is_ok();
     if THEME.get().is_some() {
-        set_syntax_theme(resolve_theme_with_override(
+        set_syntax_theme(theme_catalog::resolve_theme_with_override(
             name.as_deref(),
             codex_home.as_deref(),
         ));
@@ -102,147 +105,13 @@ pub(crate) fn set_theme_override(
     warning
 }
 
-/// Check whether a theme name resolves to a bundled theme or a custom
-/// `.tmTheme` file.  Returns a user-facing warning when it does not.
-pub(crate) fn validate_theme_name(name: Option<&str>, codex_home: Option<&Path>) -> Option<String> {
-    let name = name?;
-    let custom_theme_path_display = codex_home
-        .map(|home| custom_theme_path(name, home).display().to_string())
-        .unwrap_or_else(|| format!("$CODEX_HOME/themes/{name}.tmTheme"));
-    // Legacy bundled themes keep precedence over custom files.
-    if parse_theme_name(name).is_some() {
-        return None;
-    }
-    // Custom themes must parse successfully; an unreadable/invalid file should
-    // still surface a startup warning so users can diagnose configuration issues.
-    if let Some(home) = codex_home {
-        let custom_path = custom_theme_path(name, home);
-        if custom_path.is_file() {
-            if load_custom_theme(name, home).is_some() {
-                return None;
-            }
-            if ghostty_themes::contains(name) {
-                return None;
-            }
-            return Some(format!(
-                "Custom theme \"{name}\" at {custom_theme_path_display} could not \
-                 be loaded (invalid .tmTheme format). Falling back to the default theme."
-            ));
-        }
-    }
-    if ghostty_themes::contains(name) {
-        return None;
-    }
-    Some(format!(
-        "Theme \"{name}\" not found. Using the default theme. \
-         To use a custom theme, place a .tmTheme file at \
-         {custom_theme_path_display}."
-    ))
-}
-
-/// Map a kebab-case theme name to the corresponding `EmbeddedThemeName`.
-fn parse_theme_name(name: &str) -> Option<EmbeddedThemeName> {
-    match name {
-        "ansi" => Some(EmbeddedThemeName::Ansi),
-        "base16" => Some(EmbeddedThemeName::Base16),
-        "base16-eighties-dark" => Some(EmbeddedThemeName::Base16EightiesDark),
-        "base16-mocha-dark" => Some(EmbeddedThemeName::Base16MochaDark),
-        "base16-ocean-dark" => Some(EmbeddedThemeName::Base16OceanDark),
-        "base16-ocean-light" => Some(EmbeddedThemeName::Base16OceanLight),
-        "base16-256" => Some(EmbeddedThemeName::Base16_256),
-        "catppuccin-frappe" => Some(EmbeddedThemeName::CatppuccinFrappe),
-        "catppuccin-latte" => Some(EmbeddedThemeName::CatppuccinLatte),
-        "catppuccin-macchiato" => Some(EmbeddedThemeName::CatppuccinMacchiato),
-        "catppuccin-mocha" => Some(EmbeddedThemeName::CatppuccinMocha),
-        "coldark-cold" => Some(EmbeddedThemeName::ColdarkCold),
-        "coldark-dark" => Some(EmbeddedThemeName::ColdarkDark),
-        "dark-neon" => Some(EmbeddedThemeName::DarkNeon),
-        "dracula" => Some(EmbeddedThemeName::Dracula),
-        "github" => Some(EmbeddedThemeName::Github),
-        "gruvbox-dark" => Some(EmbeddedThemeName::GruvboxDark),
-        "gruvbox-light" => Some(EmbeddedThemeName::GruvboxLight),
-        "inspired-github" => Some(EmbeddedThemeName::InspiredGithub),
-        "1337" => Some(EmbeddedThemeName::Leet),
-        "monokai-extended" => Some(EmbeddedThemeName::MonokaiExtended),
-        "monokai-extended-bright" => Some(EmbeddedThemeName::MonokaiExtendedBright),
-        "monokai-extended-light" => Some(EmbeddedThemeName::MonokaiExtendedLight),
-        "monokai-extended-origin" => Some(EmbeddedThemeName::MonokaiExtendedOrigin),
-        "nord" => Some(EmbeddedThemeName::Nord),
-        "one-half-dark" => Some(EmbeddedThemeName::OneHalfDark),
-        "one-half-light" => Some(EmbeddedThemeName::OneHalfLight),
-        "solarized-dark" => Some(EmbeddedThemeName::SolarizedDark),
-        "solarized-light" => Some(EmbeddedThemeName::SolarizedLight),
-        "sublime-snazzy" => Some(EmbeddedThemeName::SublimeSnazzy),
-        "two-dark" => Some(EmbeddedThemeName::TwoDark),
-        "zenburn" => Some(EmbeddedThemeName::Zenburn),
-        _ => None,
-    }
-}
-
-/// Build the expected path for a custom theme file.
-fn custom_theme_path(name: &str, codex_home: &Path) -> PathBuf {
-    codex_home.join("themes").join(format!("{name}.tmTheme"))
-}
-
-/// Try to load a custom `.tmTheme` file from `{codex_home}/themes/{name}.tmTheme`.
-fn load_custom_theme(name: &str, codex_home: &Path) -> Option<Theme> {
-    ThemeSet::get_theme(custom_theme_path(name, codex_home)).ok()
-}
-
-fn adaptive_default_theme_selection() -> (EmbeddedThemeName, &'static str) {
-    match crate::terminal_palette::default_bg() {
-        Some(bg) if crate::color::is_light(bg) => {
-            (EmbeddedThemeName::CatppuccinLatte, "catppuccin-latte")
-        }
-        _ => (EmbeddedThemeName::CatppuccinMocha, "catppuccin-mocha"),
-    }
-}
-
-fn adaptive_default_embedded_theme_name() -> EmbeddedThemeName {
-    adaptive_default_theme_selection().0
-}
-
-/// Return the kebab-case name of the adaptive default syntax theme selected
-/// from terminal background lightness.
-pub(crate) fn adaptive_default_theme_name() -> &'static str {
-    adaptive_default_theme_selection().1
-}
-
 /// Build the theme from current override/default-theme settings.
-/// Extracted from the old `theme()` init closure so it can be reused.
-fn resolve_theme_with_override(name: Option<&str>, codex_home: Option<&Path>) -> Theme {
-    let ts = two_face::theme::extra();
-
-    // Honor user-configured theme if valid.
-    if let Some(name) = name {
-        // 1. Try bundled theme by kebab-case name.
-        if let Some(theme_name) = parse_theme_name(name) {
-            return ts.get(theme_name).clone();
-        }
-        // 2. Try loading {CODEX_HOME}/themes/{name}.tmTheme from disk.
-        if let Some(home) = codex_home
-            && let Some(theme) = load_custom_theme(name, home)
-        {
-            return theme;
-        }
-        // 3. Try the bundled Ghostty palettes.
-        if let Some(theme) = ghostty_themes::resolve(name) {
-            return theme;
-        }
-        tracing::debug!("Theme \"{name}\" not recognized; using default theme");
-    }
-
-    ts.get(adaptive_default_embedded_theme_name()).clone()
-}
-
-/// Build the theme from current override/default-theme settings.
-/// Extracted from the old `theme()` init closure so it can be reused.
 fn build_default_theme() -> Theme {
     let name = THEME_OVERRIDE.get().and_then(|name| name.as_deref());
     let codex_home = CODEX_HOME
         .get()
         .and_then(|codex_home| codex_home.as_deref());
-    resolve_theme_with_override(name, codex_home)
+    theme_catalog::resolve_theme_with_override(name, codex_home)
 }
 
 fn theme_lock() -> &'static RwLock<Theme> {
@@ -332,137 +201,16 @@ fn foreground_style_for_scopes_with_theme(theme: &Theme, scope_names: &[&str]) -
 /// This intentionally reflects persisted configuration/default selection, not
 /// transient runtime swaps applied via `set_syntax_theme`.
 pub(crate) fn configured_theme_name() -> String {
-    // Explicit user override?
     if let Some(Some(name)) = THEME_OVERRIDE.get() {
-        if parse_theme_name(name).is_some() {
-            return name.clone();
-        }
-        if let Some(Some(home)) = CODEX_HOME.get()
-            && load_custom_theme(name, home).is_some()
-        {
-            return name.clone();
-        }
-        if ghostty_themes::contains(name) {
+        let codex_home = CODEX_HOME
+            .get()
+            .and_then(|codex_home| codex_home.as_deref());
+        if theme_catalog::theme_name_is_known(name, codex_home) {
             return name.clone();
         }
     }
     adaptive_default_theme_name().to_string()
 }
-
-/// Resolve a theme name to a `Theme` (bundled or custom). Returns `None`
-/// when the name is unknown and no matching `.tmTheme` file exists.
-pub(crate) fn resolve_theme_by_name(name: &str, codex_home: Option<&Path>) -> Option<Theme> {
-    let ts = two_face::theme::extra();
-    // Bundled theme?
-    if let Some(embedded) = parse_theme_name(name) {
-        return Some(ts.get(embedded).clone());
-    }
-    // Custom .tmTheme file?
-    if let Some(home) = codex_home
-        && let Some(theme) = load_custom_theme(name, home)
-    {
-        return Some(theme);
-    }
-    if let Some(theme) = ghostty_themes::resolve(name) {
-        return Some(theme);
-    }
-    None
-}
-
-/// A theme available in the picker, either bundled or loaded from a custom
-/// `.tmTheme` file under `{CODEX_HOME}/themes/`.
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct ThemeEntry {
-    /// Kebab-case identifier used for config persistence and theme resolution.
-    pub name: String,
-    /// `true` when this entry was discovered from a `.tmTheme` file on disk
-    /// rather than a bundled theme.
-    pub is_custom: bool,
-}
-
-/// List all available theme names: the existing built-in/custom group followed
-/// by the bundled Ghostty palettes.
-pub(crate) fn list_available_themes(codex_home: Option<&Path>) -> Vec<ThemeEntry> {
-    let mut entries: Vec<ThemeEntry> = BUILTIN_THEME_NAMES
-        .iter()
-        .map(|name| ThemeEntry {
-            name: name.to_string(),
-            is_custom: false,
-        })
-        .collect();
-
-    // Discover custom themes on disk, deduplicating against builtins.
-    if let Some(home) = codex_home {
-        let themes_dir = home.join("themes");
-        if let Ok(read_dir) = std::fs::read_dir(&themes_dir) {
-            for entry in read_dir.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("tmTheme")
-                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                {
-                    let name = stem.to_string();
-                    let is_valid_theme = ThemeSet::get_theme(&path).is_ok();
-                    if is_valid_theme && !entries.iter().any(|entry| entry.name == name) {
-                        entries.push(ThemeEntry {
-                            name,
-                            is_custom: true,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Preserve the original stable ordering of built-in and custom themes,
-    // then place every bundled Ghostty palette after that existing group.
-    entries.sort_by_cached_key(|entry| (entry.name.to_ascii_lowercase(), entry.name.clone()));
-    for name in ghostty_themes::names() {
-        if !entries.iter().any(|entry| entry.name == name) {
-            entries.push(ThemeEntry {
-                name: name.to_string(),
-                is_custom: false,
-            });
-        }
-    }
-
-    entries
-}
-
-/// All 32 bundled theme names in kebab-case, ordered alphabetically.
-const BUILTIN_THEME_NAMES: &[&str] = &[
-    "1337",
-    "ansi",
-    "base16",
-    "base16-256",
-    "base16-eighties-dark",
-    "base16-mocha-dark",
-    "base16-ocean-dark",
-    "base16-ocean-light",
-    "catppuccin-frappe",
-    "catppuccin-latte",
-    "catppuccin-macchiato",
-    "catppuccin-mocha",
-    "coldark-cold",
-    "coldark-dark",
-    "dark-neon",
-    "dracula",
-    "github",
-    "gruvbox-dark",
-    "gruvbox-light",
-    "inspired-github",
-    "monokai-extended",
-    "monokai-extended-bright",
-    "monokai-extended-light",
-    "monokai-extended-origin",
-    "nord",
-    "one-half-dark",
-    "one-half-light",
-    "solarized-dark",
-    "solarized-light",
-    "sublime-snazzy",
-    "two-dark",
-    "zenburn",
-];
 
 // -- Style conversion (syntect -> ratatui) ------------------------------------
 
@@ -718,30 +466,13 @@ mod tests {
     use super::*;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
+    use std::path::Path;
     use std::str::FromStr;
     use syntect::highlighting::Color as SyntectColor;
     use syntect::highlighting::ScopeSelectors;
     use syntect::highlighting::StyleModifier;
     use syntect::highlighting::ThemeItem;
     use syntect::highlighting::ThemeSettings;
-
-    fn write_minimal_tmtheme(path: &Path) {
-        // Minimal valid .tmTheme plist (enough for syntect to parse).
-        std::fs::write(
-            path,
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-<key>name</key><string>Test</string>
-<key>settings</key><array><dict>
-<key>settings</key><dict>
-<key>foreground</key><string>#FFFFFF</string>
-<key>background</key><string>#000000</string>
-</dict></dict></array>
-</dict></plist>"#,
-        )
-        .unwrap();
-    }
 
     fn write_tmtheme_with_diff_backgrounds(
         path: &Path,
@@ -1342,328 +1073,5 @@ mod tests {
                 deleted: Some((64, 80, 96)),
             }
         );
-    }
-
-    #[test]
-    fn parse_theme_name_covers_all_variants() {
-        let known = [
-            ("ansi", EmbeddedThemeName::Ansi),
-            ("base16", EmbeddedThemeName::Base16),
-            (
-                "base16-eighties-dark",
-                EmbeddedThemeName::Base16EightiesDark,
-            ),
-            ("base16-mocha-dark", EmbeddedThemeName::Base16MochaDark),
-            ("base16-ocean-dark", EmbeddedThemeName::Base16OceanDark),
-            ("base16-ocean-light", EmbeddedThemeName::Base16OceanLight),
-            ("base16-256", EmbeddedThemeName::Base16_256),
-            ("catppuccin-frappe", EmbeddedThemeName::CatppuccinFrappe),
-            ("catppuccin-latte", EmbeddedThemeName::CatppuccinLatte),
-            (
-                "catppuccin-macchiato",
-                EmbeddedThemeName::CatppuccinMacchiato,
-            ),
-            ("catppuccin-mocha", EmbeddedThemeName::CatppuccinMocha),
-            ("coldark-cold", EmbeddedThemeName::ColdarkCold),
-            ("coldark-dark", EmbeddedThemeName::ColdarkDark),
-            ("dark-neon", EmbeddedThemeName::DarkNeon),
-            ("dracula", EmbeddedThemeName::Dracula),
-            ("github", EmbeddedThemeName::Github),
-            ("gruvbox-dark", EmbeddedThemeName::GruvboxDark),
-            ("gruvbox-light", EmbeddedThemeName::GruvboxLight),
-            ("inspired-github", EmbeddedThemeName::InspiredGithub),
-            ("1337", EmbeddedThemeName::Leet),
-            ("monokai-extended", EmbeddedThemeName::MonokaiExtended),
-            (
-                "monokai-extended-bright",
-                EmbeddedThemeName::MonokaiExtendedBright,
-            ),
-            (
-                "monokai-extended-light",
-                EmbeddedThemeName::MonokaiExtendedLight,
-            ),
-            (
-                "monokai-extended-origin",
-                EmbeddedThemeName::MonokaiExtendedOrigin,
-            ),
-            ("nord", EmbeddedThemeName::Nord),
-            ("one-half-dark", EmbeddedThemeName::OneHalfDark),
-            ("one-half-light", EmbeddedThemeName::OneHalfLight),
-            ("solarized-dark", EmbeddedThemeName::SolarizedDark),
-            ("solarized-light", EmbeddedThemeName::SolarizedLight),
-            ("sublime-snazzy", EmbeddedThemeName::SublimeSnazzy),
-            ("two-dark", EmbeddedThemeName::TwoDark),
-            ("zenburn", EmbeddedThemeName::Zenburn),
-        ];
-        for (kebab, expected) in &known {
-            assert_eq!(
-                parse_theme_name(kebab),
-                Some(*expected),
-                "parse_theme_name({kebab:?}) did not return expected variant"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_theme_name_returns_none_for_unknown() {
-        assert_eq!(parse_theme_name("nonexistent-theme"), None);
-        assert_eq!(parse_theme_name(""), None);
-    }
-
-    #[test]
-    fn load_custom_theme_from_tmtheme_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let themes_dir = dir.path().join("themes");
-        std::fs::create_dir(&themes_dir).unwrap();
-        write_minimal_tmtheme(&themes_dir.join("test-custom.tmTheme"));
-        let theme = load_custom_theme("test-custom", dir.path());
-        assert!(theme.is_some(), "should load .tmTheme from themes dir");
-    }
-
-    #[test]
-    fn load_custom_theme_returns_none_for_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load_custom_theme("nonexistent", dir.path()).is_none());
-    }
-
-    #[test]
-    fn validate_theme_name_none_for_bundled() {
-        // Bundled themes should never produce a warning.
-        assert!(validate_theme_name(Some("dracula"), /*codex_home*/ None).is_none());
-        assert!(validate_theme_name(Some("nord"), Some(Path::new("/nonexistent"))).is_none());
-    }
-
-    #[test]
-    fn validate_theme_name_none_when_no_override() {
-        assert!(validate_theme_name(/*name*/ None, /*codex_home*/ None).is_none());
-    }
-
-    #[test]
-    fn validate_theme_name_warns_for_missing_custom() {
-        let dir = tempfile::tempdir().unwrap();
-        let warning = validate_theme_name(Some("my-fancy"), Some(dir.path()));
-        assert!(warning.is_some(), "should warn when theme file is absent");
-        let msg = warning.unwrap();
-        assert!(
-            msg.contains("my-fancy"),
-            "warning should mention the theme name"
-        );
-    }
-
-    #[test]
-    fn validate_theme_name_none_when_custom_file_is_valid() {
-        let dir = tempfile::tempdir().unwrap();
-        let themes_dir = dir.path().join("themes");
-        std::fs::create_dir(&themes_dir).unwrap();
-        write_minimal_tmtheme(&themes_dir.join("my-fancy.tmTheme"));
-        assert!(
-            validate_theme_name(Some("my-fancy"), Some(dir.path())).is_none(),
-            "should not warn when custom .tmTheme file parses successfully"
-        );
-    }
-
-    #[test]
-    fn validate_theme_name_warns_when_custom_file_is_invalid() {
-        let dir = tempfile::tempdir().unwrap();
-        let themes_dir = dir.path().join("themes");
-        std::fs::create_dir(&themes_dir).unwrap();
-        std::fs::write(themes_dir.join("my-fancy.tmTheme"), "placeholder").unwrap();
-        let warning = validate_theme_name(Some("my-fancy"), Some(dir.path()));
-        assert!(
-            warning.is_some(),
-            "should warn when custom .tmTheme exists but cannot be parsed"
-        );
-        assert!(
-            warning
-                .as_deref()
-                .is_some_and(|msg| msg.contains("could not be loaded")),
-            "warning should explain that the theme file is invalid"
-        );
-    }
-
-    #[test]
-    fn list_available_themes_excludes_invalid_custom_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let themes_dir = dir.path().join("themes");
-        std::fs::create_dir(&themes_dir).unwrap();
-        write_minimal_tmtheme(&themes_dir.join("valid-custom.tmTheme"));
-        std::fs::write(themes_dir.join("broken-custom.tmTheme"), "not a plist").unwrap();
-
-        let entries = list_available_themes(Some(dir.path()));
-
-        assert!(
-            entries
-                .iter()
-                .any(|entry| entry.name == "valid-custom" && entry.is_custom),
-            "expected valid custom theme to be listed"
-        );
-        assert!(
-            !entries
-                .iter()
-                .any(|entry| entry.name == "broken-custom" && entry.is_custom),
-            "expected invalid custom theme to be excluded from list"
-        );
-    }
-
-    #[test]
-    fn custom_theme_takes_precedence_over_ghostty_theme_with_same_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let themes_dir = dir.path().join("themes");
-        std::fs::create_dir(&themes_dir).unwrap();
-        let name = "ghostty-3024-day";
-        write_minimal_tmtheme(&themes_dir.join(format!("{name}.tmTheme")));
-        let expected = load_custom_theme(name, dir.path()).expect("expected custom theme to load");
-
-        assert!(validate_theme_name(Some(name), Some(dir.path())).is_none());
-        assert_eq!(
-            resolve_theme_with_override(Some(name), Some(dir.path())),
-            expected
-        );
-        assert_eq!(
-            resolve_theme_by_name(name, Some(dir.path())),
-            Some(expected)
-        );
-        let matching_entries: Vec<ThemeEntry> = list_available_themes(Some(dir.path()))
-            .into_iter()
-            .filter(|entry| entry.name == name)
-            .collect();
-        assert_eq!(
-            matching_entries,
-            vec![ThemeEntry {
-                name: name.to_string(),
-                is_custom: true,
-            }]
-        );
-    }
-
-    #[test]
-    fn list_available_themes_preserves_existing_order_before_ghostty_group() {
-        let dir = tempfile::tempdir().unwrap();
-        let themes_dir = dir.path().join("themes");
-        std::fs::create_dir(&themes_dir).unwrap();
-        write_minimal_tmtheme(&themes_dir.join("zzz-custom.tmTheme"));
-        write_minimal_tmtheme(&themes_dir.join("Aaa-custom.tmTheme"));
-        write_minimal_tmtheme(&themes_dir.join("mmm-custom.tmTheme"));
-
-        let entries = list_available_themes(Some(dir.path()));
-        let mut expected: Vec<ThemeEntry> = BUILTIN_THEME_NAMES
-            .iter()
-            .map(|name| ThemeEntry {
-                name: name.to_string(),
-                is_custom: false,
-            })
-            .collect();
-        expected.extend(
-            ["Aaa-custom", "mmm-custom", "zzz-custom"].map(|name| ThemeEntry {
-                name: name.to_string(),
-                is_custom: true,
-            }),
-        );
-        expected.sort_by_cached_key(|entry| (entry.name.to_ascii_lowercase(), entry.name.clone()));
-        expected.extend(ghostty_themes::names().map(|name| ThemeEntry {
-            name: name.to_string(),
-            is_custom: false,
-        }));
-
-        assert_eq!(entries, expected);
-    }
-
-    #[test]
-    fn ghostty_theme_maps_known_palette_to_rgb_colors() {
-        let name = "ghostty-3024-day";
-        let theme = resolve_theme_by_name(name, /*codex_home*/ None)
-            .unwrap_or_else(|| panic!("expected bundled Ghostty theme to resolve: {name}"));
-
-        assert_eq!(theme.name.as_deref(), Some(name));
-        assert_rgb(
-            theme.settings.background.and_then(convert_syntect_color),
-            (0xf7, 0xf7, 0xf7),
-        );
-        assert_rgb(
-            theme.settings.foreground.and_then(convert_syntect_color),
-            (0x4a, 0x45, 0x43),
-        );
-        let expected_scope_colors = [
-            ("keyword", (0xa1, 0x6a, 0x94)),
-            ("entity.name.function", (0x01, 0xa0, 0xe4)),
-            ("constant.numeric", (0xca, 0xba, 0x00)),
-            ("string", (0x01, 0xa2, 0x52)),
-        ];
-        for (scope, expected) in expected_scope_colors {
-            let style = foreground_style_for_scopes_with_theme(&theme, &[scope])
-                .unwrap_or_else(|| panic!("expected foreground style for {scope}"));
-            assert_rgb(style.fg, expected);
-        }
-    }
-
-    #[test]
-    fn ghostty_theme_names_are_prefixed_and_unique() {
-        let names: Vec<&str> = ghostty_themes::names().collect();
-        assert!(names.iter().all(|name| name.starts_with("ghostty-")));
-        let unique_names: std::collections::HashSet<&str> = names.iter().copied().collect();
-        assert_eq!(unique_names.len(), names.len());
-    }
-
-    #[test]
-    fn parse_theme_name_is_exhaustive() {
-        use two_face::theme::EmbeddedLazyThemeSet;
-
-        // Every variant in the embedded set must be reachable via parse_theme_name.
-        let all_variants = EmbeddedLazyThemeSet::theme_names();
-
-        // Guard: if two-face adds themes, this test forces us to update the mapping.
-        assert_eq!(
-            all_variants.len(),
-            32,
-            "two-face theme count changed — update parse_theme_name"
-        );
-
-        // Build the set of variants reachable through our kebab-case mapping.
-        let kebab_names = [
-            "ansi",
-            "base16",
-            "base16-eighties-dark",
-            "base16-mocha-dark",
-            "base16-ocean-dark",
-            "base16-ocean-light",
-            "base16-256",
-            "catppuccin-frappe",
-            "catppuccin-latte",
-            "catppuccin-macchiato",
-            "catppuccin-mocha",
-            "coldark-cold",
-            "coldark-dark",
-            "dark-neon",
-            "dracula",
-            "github",
-            "gruvbox-dark",
-            "gruvbox-light",
-            "inspired-github",
-            "1337",
-            "monokai-extended",
-            "monokai-extended-bright",
-            "monokai-extended-light",
-            "monokai-extended-origin",
-            "nord",
-            "one-half-dark",
-            "one-half-light",
-            "solarized-dark",
-            "solarized-light",
-            "sublime-snazzy",
-            "two-dark",
-            "zenburn",
-        ];
-        let mapped: Vec<EmbeddedThemeName> = kebab_names
-            .iter()
-            .map(|k| parse_theme_name(k).unwrap_or_else(|| panic!("unmapped kebab name: {k}")))
-            .collect();
-
-        // Every variant from two-face must appear in our mapped set.
-        for variant in all_variants {
-            assert!(
-                mapped.contains(variant),
-                "EmbeddedThemeName::{variant:?} has no kebab-case mapping in parse_theme_name"
-            );
-        }
     }
 }

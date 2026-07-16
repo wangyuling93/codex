@@ -1,9 +1,11 @@
 use ratatui::layout::Rect;
 
+mod ansi_theme_encoding;
 mod ghostty_themes;
 pub(crate) mod highlight;
 pub(crate) mod line_utils;
 pub(crate) mod renderable;
+mod theme_catalog;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Insets {

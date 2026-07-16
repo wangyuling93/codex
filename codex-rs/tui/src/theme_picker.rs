@@ -338,7 +338,7 @@ pub(crate) fn build_theme_picker_params(
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            let display_name = if entry.is_custom {
+            let display_name = if entry.is_custom() {
                 format!("{} (custom)", entry.name)
             } else {
                 entry.name.clone()

@@ -860,51 +860,6 @@ impl App {
         self.chat_widget.set_tui_theme(Some(name));
     }
 
-    pub(super) async fn update_full_transparency(&mut self, tui: &mut tui::Tui, enabled: bool) {
-        if self.chat_widget.is_user_turn_pending_or_running() {
-            self.chat_widget.add_error_message(
-                "'/transparent' is disabled while a task is in progress.".to_string(),
-            );
-            return;
-        }
-
-        let edit = crate::legacy_core::config::edit::full_transparency_edit(enabled);
-        let apply_result = ConfigEditsBuilder::for_config(&self.config)
-            .with_edits([edit])
-            .apply()
-            .await;
-        match apply_result {
-            Ok(()) => {
-                self.config.tui_full_transparency = enabled;
-                self.chat_widget.set_full_transparency(enabled);
-                tui.set_full_transparency(enabled);
-                let message = if enabled {
-                    "Full transparency enabled."
-                } else {
-                    "Full transparency disabled."
-                };
-                self.chat_widget
-                    .add_info_message(message.to_string(), /*hint*/ None);
-                if !self.transcript_cells.is_empty()
-                    && let Err(err) = self.reflow_transcript_now(tui)
-                {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to reflow transcript after full transparency toggle"
-                    );
-                    self.chat_widget
-                        .add_error_message(format!("Failed to redraw transcript: {err}"));
-                }
-                tui.frame_requester().schedule_frame();
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "failed to persist full transparency setting");
-                self.chat_widget
-                    .add_error_message(format!("Failed to save full transparency setting: {err}"));
-            }
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn sync_tui_pet_selection(&mut self, pet: String) {
         self.config.tui_pet = Some(pet.clone());
@@ -1219,7 +1174,6 @@ mod tests {
     use super::*;
     use crate::app::test_support::app_enabled_in_effective_config;
     use crate::app::test_support::make_test_app;
-    use crate::app::test_support::make_test_app_with_event_receiver;
     use crate::legacy_core::config::edit::ConfigEdit;
     use crate::test_support::PathBufExt;
     use codex_config::ConfigLayerEntry;
@@ -1756,138 +1710,6 @@ terminal_resize_reflow_max_rows = 9000
             app.chat_widget.config_ref().tui_theme.as_deref(),
             Some("dracula")
         );
-    }
-
-    #[tokio::test]
-    async fn set_full_transparency_event_persists_and_syncs_runtime_state() -> Result<()> {
-        let (mut app, mut app_event_rx) = make_test_app_with_event_receiver().await;
-        let mut app_server =
-            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        app.transcript_cells
-            .push(Arc::new(history_cell::new_info_event(
-                "Existing transcript entry.".to_string(),
-                /*hint*/ None,
-            )));
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-
-        let control = Box::pin(app.handle_event(
-            &mut tui,
-            &mut app_server,
-            AppEvent::SetFullTransparency { enabled: true },
-        ))
-        .await?;
-
-        assert!(matches!(control, AppRunControl::Continue));
-        assert!(app.config.tui_full_transparency);
-        assert!(app.chat_widget.config_ref().tui_full_transparency);
-        assert!(tui.terminal.full_transparency());
-        assert!(app.has_emitted_history_lines);
-        let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-        let config: toml::Value = toml::from_str(&config)?;
-        let persisted = config
-            .get("tui")
-            .and_then(toml::Value::as_table)
-            .and_then(|tui| tui.get("full_transparency"));
-        assert_eq!(persisted, Some(&toml::Value::Boolean(true)));
-
-        let mut next_history_text = || loop {
-            match app_event_rx.try_recv() {
-                Ok(AppEvent::InsertHistoryCell(cell)) => {
-                    return cell
-                        .display_lines(/*width*/ 80)
-                        .iter()
-                        .map(|line| {
-                            line.spans
-                                .iter()
-                                .map(|span| span.content.as_ref())
-                                .collect::<String>()
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                }
-                Ok(_) => continue,
-                Err(err) => panic!("expected transparency feedback history cell: {err}"),
-            }
-        };
-        let enabled_feedback = next_history_text();
-
-        let control = Box::pin(app.handle_event(
-            &mut tui,
-            &mut app_server,
-            AppEvent::SetFullTransparency { enabled: false },
-        ))
-        .await?;
-
-        assert!(matches!(control, AppRunControl::Continue));
-        assert!(!app.config.tui_full_transparency);
-        assert!(!app.chat_widget.config_ref().tui_full_transparency);
-        assert!(!tui.terminal.full_transparency());
-        let disabled_feedback = next_history_text();
-        insta::assert_snapshot!(
-            "full_transparency_toggle_feedback",
-            format!("{enabled_feedback}\n{disabled_feedback}")
-        );
-        let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-        let config: toml::Value = toml::from_str(&config)?;
-        let persisted = config
-            .get("tui")
-            .and_then(toml::Value::as_table)
-            .and_then(|tui| tui.get("full_transparency"));
-        assert_eq!(persisted, Some(&toml::Value::Boolean(false)));
-        app_server.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_full_transparency_is_rejected_after_task_starts() -> Result<()> {
-        let (mut app, mut app_event_rx) = make_test_app_with_event_receiver().await;
-        let codex_home = tempdir()?;
-        app.config.codex_home = codex_home.path().to_path_buf().abs();
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-        app.chat_widget.handle_server_notification(
-            ServerNotification::TurnStarted(codex_app_server_protocol::TurnStartedNotification {
-                thread_id: ThreadId::new().to_string(),
-                turn: Turn {
-                    id: "turn-1".to_string(),
-                    items_view: codex_app_server_protocol::TurnItemsView::Full,
-                    items: Vec::new(),
-                    status: TurnStatus::InProgress,
-                    error: None,
-                    started_at: Some(0),
-                    completed_at: None,
-                    duration_ms: None,
-                },
-            }),
-            /*replay_kind*/ None,
-        );
-        assert!(app.chat_widget.is_user_turn_pending_or_running());
-
-        app.update_full_transparency(&mut tui, /*enabled*/ true)
-            .await;
-
-        assert!(!app.config.tui_full_transparency);
-        assert!(!app.chat_widget.config_ref().tui_full_transparency);
-        assert!(!tui.terminal.full_transparency());
-        assert!(!codex_home.path().join("config.toml").exists());
-        let event = app_event_rx
-            .try_recv()
-            .expect("expected task-running transparency error");
-        let AppEvent::InsertHistoryCell(cell) = event else {
-            panic!("expected task-running history cell, got {event:?}");
-        };
-        let rendered = cell
-            .display_lines(/*width*/ 80)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert_eq!(
-            rendered,
-            "■ '/transparent' is disabled while a task is in progress."
-        );
-        Ok(())
     }
 
     #[tokio::test]

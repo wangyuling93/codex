@@ -4,6 +4,7 @@ use std::io::stdout;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Position;
 use ratatui::layout::Size;
+use ratatui::text::Line;
 
 use super::Tui;
 use super::terminal_stderr::TerminalStderrGuard;
@@ -25,4 +26,11 @@ pub(crate) fn make_test_tui() -> io::Result<Tui> {
         /*enhanced_keys_supported*/ false,
         stderr_guard,
     ))
+}
+
+pub(crate) fn pending_history_lines(tui: &Tui) -> Vec<Line<'static>> {
+    tui.pending_history_lines
+        .iter()
+        .flat_map(|batch| batch.lines.iter().map(|line| line.line.clone()))
+        .collect()
 }

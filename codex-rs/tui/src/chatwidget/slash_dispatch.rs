@@ -11,7 +11,6 @@ use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
 use crate::bottom_pane::slash_commands::SlashCommandItem;
-use crate::bottom_pane::slash_commands::find_bare_slash_command;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
 use crate::goal_files::GoalDraft;
@@ -953,12 +952,9 @@ impl ChatWidget {
         }
 
         let service_tier_commands = self.current_model_service_tier_commands();
-        let command = if rest.is_empty() {
-            find_bare_slash_command(name, self.builtin_command_flags(), &service_tier_commands)
-        } else {
+        let Some(command) =
             find_slash_command(name, self.builtin_command_flags(), &service_tier_commands)
-        };
-        let Some(command) = command else {
+        else {
             self.add_info_message(
                 format!(
                     r#"Unrecognized command '/{name}'. Type "/" for a list of supported commands."#

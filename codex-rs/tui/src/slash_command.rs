@@ -179,6 +179,7 @@ impl SlashCommand {
             self,
             SlashCommand::Copy
                 | SlashCommand::Raw
+                | SlashCommand::Transparent
                 | SlashCommand::Diff
                 | SlashCommand::Mention
                 | SlashCommand::Status
@@ -298,6 +299,8 @@ mod tests {
         assert!(SlashCommand::Raw.available_during_task());
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
+        assert!(!SlashCommand::Transparent.available_during_task());
+        assert!(SlashCommand::Transparent.available_in_side_conversation());
         assert!(SlashCommand::App.available_during_task());
     }
 

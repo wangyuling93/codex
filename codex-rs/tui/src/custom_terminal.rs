@@ -79,14 +79,6 @@ fn display_width(s: &str) -> usize {
     visible.width()
 }
 
-pub(crate) fn modifier_for_transparent_background(mut modifier: Modifier) -> Modifier {
-    if modifier.contains(Modifier::REVERSED) {
-        modifier.remove(Modifier::REVERSED);
-        modifier.insert(Modifier::UNDERLINED);
-    }
-    modifier
-}
-
 pub struct Frame<'a> {
     /// Where should the cursor be after drawing this frame?
     ///
@@ -425,10 +417,7 @@ where
         render_callback(&mut frame).map_err(Into::into)?;
 
         if full_transparency {
-            for cell in &mut frame.buffer.content {
-                cell.set_bg(Color::Reset);
-                cell.modifier = modifier_for_transparent_background(cell.modifier);
-            }
+            crate::transparent_background::apply_to_buffer(frame.buffer);
         }
 
         // We can't change the cursor position right away because we have to flush the frame to
@@ -522,9 +511,7 @@ where
 
     /// Set whether all rendered cells should use the terminal's default background.
     pub fn set_full_transparency(&mut self, enabled: bool) {
-        if self.full_transparency != enabled {
-            self.full_transparency = enabled;
-        }
+        self.full_transparency = enabled;
     }
 
     pub(crate) fn full_transparency(&self) -> bool {
@@ -806,11 +793,9 @@ impl ModifierDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_backend::VT100Backend;
     use pretty_assertions::assert_eq;
     use ratatui::backend::WindowSize;
     use ratatui::layout::Rect;
-    use ratatui::style::Color;
     use ratatui::style::Style;
 
     struct CaptureBackend {
@@ -982,110 +967,6 @@ mod tests {
             actual.contains(&expected),
             "expected terminal output to contain cursor style {expected:?}, got {actual:?}"
         );
-    }
-
-    #[test]
-    fn full_transparency_repaints_backgrounds_remaps_reverse_and_can_be_disabled() {
-        let area = Rect::new(0, 0, 3, 1);
-        let mut terminal =
-            Terminal::with_options(VT100Backend::new(area.width, area.height)).expect("terminal");
-        terminal.set_viewport_area(area);
-
-        terminal
-            .draw(|frame| {
-                frame
-                    .buffer_mut()
-                    .set_style(area, Style::default().bg(Color::Red));
-                frame.buffer_mut().set_string(
-                    0,
-                    0,
-                    "X",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Red)
-                        .add_modifier(Modifier::REVERSED),
-                );
-            })
-            .expect("opaque draw");
-
-        for column in 0..area.width {
-            assert_ne!(
-                terminal
-                    .backend()
-                    .vt100()
-                    .screen()
-                    .cell(/*row*/ 0, column)
-                    .expect("opaque screen cell")
-                    .bgcolor(),
-                vt100::Color::Default
-            );
-        }
-
-        terminal.set_full_transparency(/*enabled*/ true);
-        terminal
-            .draw(|frame| {
-                frame
-                    .buffer_mut()
-                    .set_style(area, Style::default().bg(Color::Red));
-                frame.buffer_mut().set_string(
-                    0,
-                    0,
-                    "X",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Red)
-                        .add_modifier(Modifier::REVERSED),
-                );
-            })
-            .expect("transparent draw");
-
-        for column in 0..area.width {
-            assert_eq!(
-                terminal
-                    .backend()
-                    .vt100()
-                    .screen()
-                    .cell(/*row*/ 0, column)
-                    .expect("transparent screen cell")
-                    .bgcolor(),
-                vt100::Color::Default
-            );
-        }
-        let transparent_cell = terminal
-            .backend()
-            .vt100()
-            .screen()
-            .cell(/*row*/ 0, /*col*/ 0)
-            .expect("transparent styled cell");
-        assert!(!transparent_cell.inverse());
-        assert!(transparent_cell.underline());
-
-        terminal.set_full_transparency(/*enabled*/ false);
-        terminal
-            .draw(|frame| {
-                frame
-                    .buffer_mut()
-                    .set_style(area, Style::default().bg(Color::Red));
-                frame.buffer_mut().set_string(
-                    0,
-                    0,
-                    "X",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Red)
-                        .add_modifier(Modifier::REVERSED),
-                );
-            })
-            .expect("opaque draw");
-
-        let opaque_cell = terminal
-            .backend()
-            .vt100()
-            .screen()
-            .cell(/*row*/ 0, /*col*/ 0)
-            .expect("opaque styled cell");
-        assert_ne!(opaque_cell.bgcolor(), vt100::Color::Default);
-        assert!(opaque_cell.inverse());
     }
 
     #[test]

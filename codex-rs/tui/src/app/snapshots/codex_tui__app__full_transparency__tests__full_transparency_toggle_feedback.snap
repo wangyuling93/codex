@@ -1,5 +1,5 @@
 ---
-source: tui/src/app/config_persistence.rs
+source: tui/src/app/full_transparency_tests.rs
 expression: "format!(\"{enabled_feedback}\\n{disabled_feedback}\")"
 ---
 • Full transparency enabled.

@@ -2868,7 +2868,7 @@ async fn raw_slash_command_reports_usage_for_invalid_arg() {
 }
 
 #[tokio::test]
-async fn transparent_service_tier_collision_dispatches_through_composer() {
+async fn transparent_builtin_wins_over_colliding_service_tier_name() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     let mut preset = get_available_model(&chat, "gpt-5.4");
     let tier = preset.service_tiers.first_mut().expect("service tier");
@@ -2883,22 +2883,12 @@ async fn transparent_service_tier_collision_dispatches_through_composer() {
     submit_composer_text(&mut chat, "/transparent");
 
     let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
-    assert_eq!(chat.current_service_tier(), Some("transparent-tier"));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AppEvent::PersistServiceTierSelection {
-            service_tier: Some(service_tier),
-        } if service_tier == "transparent-tier"
-    )));
+    assert_ne!(chat.current_service_tier(), Some("transparent-tier"));
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, AppEvent::SetFullTransparency { .. }))
+            .any(|event| matches!(event, AppEvent::PersistServiceTierSelection { .. }))
     );
-
-    submit_composer_text(&mut chat, "/transparent on");
-
-    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
     assert!(
         events
             .iter()

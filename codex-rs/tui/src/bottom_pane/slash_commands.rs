@@ -90,9 +90,11 @@ pub(crate) fn commands_for_input(
     for (_, cmd) in builtins_for_input(flags) {
         commands.push(SlashCommandItem::Builtin(cmd));
         if cmd == SlashCommand::Model && tiers_enabled {
+            // Built-in names always win; omit catalog tiers that collide with a builtin.
             commands.extend(
                 service_tier_commands
                     .iter()
+                    .filter(|command| find_builtin_command(&command.name, flags).is_none())
                     .cloned()
                     .map(SlashCommandItem::ServiceTier),
             );
@@ -135,25 +137,6 @@ pub(crate) fn find_slash_command(
     }
 
     find_service_tier_command(name, flags, service_tier_commands)
-}
-
-/// Find a command entered without arguments while preserving existing dynamic command names.
-///
-/// Model-provided service tiers predate the `/transparent` built-in and their names are not
-/// reserved. Keep a bare tier named `transparent` working; the built-in remains addressable with
-/// `/transparent on|off` and through its popup entry.
-pub(crate) fn find_bare_slash_command(
-    name: &str,
-    flags: BuiltinCommandFlags,
-    service_tier_commands: &[ServiceTierCommand],
-) -> Option<SlashCommandItem> {
-    if name == SlashCommand::Transparent.command()
-        && let Some(command) = find_service_tier_command(name, flags, service_tier_commands)
-    {
-        return Some(command);
-    }
-
-    find_slash_command(name, flags, service_tier_commands)
 }
 
 fn find_service_tier_command(
@@ -252,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_transparent_preserves_colliding_service_tier_command() {
+    fn builtin_slash_commands_win_over_colliding_service_tier_names() {
         let command = ServiceTierCommand {
             id: "transparent-tier".to_string(),
             name: "transparent".to_string(),
@@ -261,13 +244,12 @@ mod tests {
         let flags = all_enabled_flags();
 
         assert_eq!(
-            find_bare_slash_command("transparent", flags, from_ref(&command)),
-            Some(SlashCommandItem::ServiceTier(command.clone()))
-        );
-        assert_eq!(
             find_slash_command("transparent", flags, from_ref(&command)),
             Some(SlashCommandItem::Builtin(SlashCommand::Transparent))
         );
+        assert!(!commands_for_input(flags, from_ref(&command)).iter().any(
+            |item| matches!(item, SlashCommandItem::ServiceTier(tier) if tier.name == "transparent")
+        ));
     }
 
     #[test]
@@ -348,6 +330,7 @@ mod tests {
                 SlashCommand::Ide,
                 SlashCommand::Copy,
                 SlashCommand::Raw,
+                SlashCommand::Transparent,
                 SlashCommand::Diff,
                 SlashCommand::Mention,
                 SlashCommand::Status,

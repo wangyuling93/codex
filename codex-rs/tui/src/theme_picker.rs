@@ -412,6 +412,7 @@ pub(crate) fn build_theme_picker_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::style::Modifier;
 
@@ -496,6 +497,25 @@ mod tests {
             params.items.iter().all(|item| item.search_value.is_some()),
             "theme picker preview mapping relies on item search_value to stay aligned with final item order"
         );
+    }
+
+    #[test]
+    fn theme_picker_lists_ghostty_themes_after_original_bundled_themes() {
+        let params = build_theme_picker_params(
+            /*current_name*/ None, /*codex_home*/ None, /*terminal_width*/ None,
+        );
+        let first_ghostty_index = params
+            .items
+            .iter()
+            .position(|item| item.name.starts_with("ghostty-"))
+            .expect("expected Ghostty themes in picker");
+        let boundary = params.items[first_ghostty_index - 3..first_ghostty_index + 5]
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_snapshot!("theme_picker_original_to_ghostty_boundary", boundary);
     }
 
     #[test]

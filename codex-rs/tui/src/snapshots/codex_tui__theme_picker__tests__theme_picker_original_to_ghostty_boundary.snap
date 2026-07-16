@@ -1,0 +1,12 @@
+---
+source: tui/src/theme_picker.rs
+expression: boundary
+---
+sublime-snazzy
+two-dark
+zenburn
+ghostty-0x96f
+ghostty-12-bit-rainbow
+ghostty-3024-day
+ghostty-3024-night
+ghostty-aardvark-blue

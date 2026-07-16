@@ -1,7 +1,7 @@
 //! Syntax highlighting engine for the TUI.
 //!
 //! Wraps [syntect] with the [two_face] grammar and theme bundles to provide
-//! ~250-language syntax highlighting and 32 bundled color themes.  The module
+//! ~250-language syntax highlighting and hundreds of bundled color themes.  The module
 //! owns four process-global singletons:
 //!
 //! | Singleton | Type | Purpose |
@@ -42,6 +42,8 @@ use syntect::parsing::SyntaxReference;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedThemeName;
+
+use super::ghostty_themes;
 
 // -- Global singletons -------------------------------------------------------
 
@@ -107,7 +109,7 @@ pub(crate) fn validate_theme_name(name: Option<&str>, codex_home: Option<&Path>)
     let custom_theme_path_display = codex_home
         .map(|home| custom_theme_path(name, home).display().to_string())
         .unwrap_or_else(|| format!("$CODEX_HOME/themes/{name}.tmTheme"));
-    // Bundled themes always resolve.
+    // Legacy bundled themes keep precedence over custom files.
     if parse_theme_name(name).is_some() {
         return None;
     }
@@ -119,11 +121,17 @@ pub(crate) fn validate_theme_name(name: Option<&str>, codex_home: Option<&Path>)
             if load_custom_theme(name, home).is_some() {
                 return None;
             }
+            if ghostty_themes::contains(name) {
+                return None;
+            }
             return Some(format!(
                 "Custom theme \"{name}\" at {custom_theme_path_display} could not \
                  be loaded (invalid .tmTheme format). Falling back to the default theme."
             ));
         }
+    }
+    if ghostty_themes::contains(name) {
+        return None;
     }
     Some(format!(
         "Theme \"{name}\" not found. Using the default theme. \
@@ -215,6 +223,10 @@ fn resolve_theme_with_override(name: Option<&str>, codex_home: Option<&Path>) ->
         if let Some(home) = codex_home
             && let Some(theme) = load_custom_theme(name, home)
         {
+            return theme;
+        }
+        // 3. Try the bundled Ghostty palettes.
+        if let Some(theme) = ghostty_themes::resolve(name) {
             return theme;
         }
         tracing::debug!("Theme \"{name}\" not recognized; using default theme");
@@ -330,6 +342,9 @@ pub(crate) fn configured_theme_name() -> String {
         {
             return name.clone();
         }
+        if ghostty_themes::contains(name) {
+            return name.clone();
+        }
     }
     adaptive_default_theme_name().to_string()
 }
@@ -348,21 +363,25 @@ pub(crate) fn resolve_theme_by_name(name: &str, codex_home: Option<&Path>) -> Op
     {
         return Some(theme);
     }
+    if let Some(theme) = ghostty_themes::resolve(name) {
+        return Some(theme);
+    }
     None
 }
 
 /// A theme available in the picker, either bundled or loaded from a custom
 /// `.tmTheme` file under `{CODEX_HOME}/themes/`.
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ThemeEntry {
     /// Kebab-case identifier used for config persistence and theme resolution.
     pub name: String,
     /// `true` when this entry was discovered from a `.tmTheme` file on disk
-    /// rather than the embedded two-face bundle.
+    /// rather than a bundled theme.
     pub is_custom: bool,
 }
 
-/// List all available theme names: bundled themes + custom `.tmTheme` files
-/// found in `{codex_home}/themes/`.
+/// List all available theme names: the existing built-in/custom group followed
+/// by the bundled Ghostty palettes.
 pub(crate) fn list_available_themes(codex_home: Option<&Path>) -> Vec<ThemeEntry> {
     let mut entries: Vec<ThemeEntry> = BUILTIN_THEME_NAMES
         .iter()
@@ -383,7 +402,7 @@ pub(crate) fn list_available_themes(codex_home: Option<&Path>) -> Vec<ThemeEntry
                 {
                     let name = stem.to_string();
                     let is_valid_theme = ThemeSet::get_theme(&path).is_ok();
-                    if is_valid_theme && !entries.iter().any(|e| e.name == name) {
+                    if is_valid_theme && !entries.iter().any(|entry| entry.name == name) {
                         entries.push(ThemeEntry {
                             name,
                             is_custom: true,
@@ -394,9 +413,17 @@ pub(crate) fn list_available_themes(codex_home: Option<&Path>) -> Vec<ThemeEntry
         }
     }
 
-    // Keep picker ordering stable across platforms/filesystems while sorting
-    // custom and bundled themes together, case-insensitively.
+    // Preserve the original stable ordering of built-in and custom themes,
+    // then place every bundled Ghostty palette after that existing group.
     entries.sort_by_cached_key(|entry| (entry.name.to_ascii_lowercase(), entry.name.clone()));
+    for name in ghostty_themes::names() {
+        if !entries.iter().any(|entry| entry.name == name) {
+            entries.push(ThemeEntry {
+                name: name.to_string(),
+                is_custom: false,
+            });
+        }
+    }
 
     entries
 }
@@ -1479,7 +1506,38 @@ mod tests {
     }
 
     #[test]
-    fn list_available_themes_returns_stable_sorted_order() {
+    fn custom_theme_takes_precedence_over_ghostty_theme_with_same_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let themes_dir = dir.path().join("themes");
+        std::fs::create_dir(&themes_dir).unwrap();
+        let name = "ghostty-3024-day";
+        write_minimal_tmtheme(&themes_dir.join(format!("{name}.tmTheme")));
+        let expected = load_custom_theme(name, dir.path()).expect("expected custom theme to load");
+
+        assert!(validate_theme_name(Some(name), Some(dir.path())).is_none());
+        assert_eq!(
+            resolve_theme_with_override(Some(name), Some(dir.path())),
+            expected
+        );
+        assert_eq!(
+            resolve_theme_by_name(name, Some(dir.path())),
+            Some(expected)
+        );
+        let matching_entries: Vec<ThemeEntry> = list_available_themes(Some(dir.path()))
+            .into_iter()
+            .filter(|entry| entry.name == name)
+            .collect();
+        assert_eq!(
+            matching_entries,
+            vec![ThemeEntry {
+                name: name.to_string(),
+                is_custom: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn list_available_themes_preserves_existing_order_before_ghostty_group() {
         let dir = tempfile::tempdir().unwrap();
         let themes_dir = dir.path().join("themes");
         std::fs::create_dir(&themes_dir).unwrap();
@@ -1488,18 +1546,62 @@ mod tests {
         write_minimal_tmtheme(&themes_dir.join("mmm-custom.tmTheme"));
 
         let entries = list_available_themes(Some(dir.path()));
-        let actual: Vec<(bool, String)> = entries
+        let mut expected: Vec<ThemeEntry> = BUILTIN_THEME_NAMES
             .iter()
-            .map(|entry| (entry.is_custom, entry.name.clone()))
+            .map(|name| ThemeEntry {
+                name: name.to_string(),
+                is_custom: false,
+            })
             .collect();
-
-        let mut expected = actual.clone();
-        expected.sort_by_cached_key(|entry| (entry.1.to_ascii_lowercase(), entry.1.clone()));
-
-        assert_eq!(
-            actual, expected,
-            "theme entries should be stable and sorted case-insensitively across built-in and custom themes"
+        expected.extend(
+            ["Aaa-custom", "mmm-custom", "zzz-custom"].map(|name| ThemeEntry {
+                name: name.to_string(),
+                is_custom: true,
+            }),
         );
+        expected.sort_by_cached_key(|entry| (entry.name.to_ascii_lowercase(), entry.name.clone()));
+        expected.extend(ghostty_themes::names().map(|name| ThemeEntry {
+            name: name.to_string(),
+            is_custom: false,
+        }));
+
+        assert_eq!(entries, expected);
+    }
+
+    #[test]
+    fn ghostty_theme_maps_known_palette_to_rgb_colors() {
+        let name = "ghostty-3024-day";
+        let theme = resolve_theme_by_name(name, /*codex_home*/ None)
+            .unwrap_or_else(|| panic!("expected bundled Ghostty theme to resolve: {name}"));
+
+        assert_eq!(theme.name.as_deref(), Some(name));
+        assert_rgb(
+            theme.settings.background.and_then(convert_syntect_color),
+            (0xf7, 0xf7, 0xf7),
+        );
+        assert_rgb(
+            theme.settings.foreground.and_then(convert_syntect_color),
+            (0x4a, 0x45, 0x43),
+        );
+        let expected_scope_colors = [
+            ("keyword", (0xa1, 0x6a, 0x94)),
+            ("entity.name.function", (0x01, 0xa0, 0xe4)),
+            ("constant.numeric", (0xca, 0xba, 0x00)),
+            ("string", (0x01, 0xa2, 0x52)),
+        ];
+        for (scope, expected) in expected_scope_colors {
+            let style = foreground_style_for_scopes_with_theme(&theme, &[scope])
+                .unwrap_or_else(|| panic!("expected foreground style for {scope}"));
+            assert_rgb(style.fg, expected);
+        }
+    }
+
+    #[test]
+    fn ghostty_theme_names_are_prefixed_and_unique() {
+        let names: Vec<&str> = ghostty_themes::names().collect();
+        assert!(names.iter().all(|name| name.starts_with("ghostty-")));
+        let unique_names: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(unique_names.len(), names.len());
     }
 
     #[test]

@@ -308,7 +308,9 @@ jobs:
           for binary in ${BINARIES}; do
             build_args+=(--bin "$binary")
           done
-          cargo build --locked --target "${TARGET}" --release --timings "${build_args[@]}"
+          # The version step changes workspace package versions, so Cargo must
+          # refresh their Cargo.lock entries before compiling.
+          cargo build --target "${TARGET}" --release --timings "${build_args[@]}"
 
       - name: Verify embedded Codex version
         shell: bash

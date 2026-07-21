@@ -110,7 +110,9 @@ jobs:
 
   build:
     name: Build unsigned arm64 DMG
-    runs-on: macos-15
+    # macOS 26 Tahoe arm64. Image ships Xcode 26.x; default tracks the OS line.
+    # No explicit xcode-select needed for Cargo/CLI + hdiutil DMG builds.
+    runs-on: macos-26
     timeout-minutes: 180
     permissions:
       contents: read
@@ -129,6 +131,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Verify macOS / Xcode toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          # Fail if the image default is not Xcode 26.x (same major as macos-26).
+          xcodebuild -version | head -n 1 | grep -E 'Xcode 26\.'
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:

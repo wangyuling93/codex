@@ -1,0 +1,302 @@
+# Fork-local Windows Intel/AMD x64 release: unsigned MSVC EXEs only.
+#
+# Separate from the canonical multi-platform `rust-release.yml` /
+# `rust-release-windows.yml` (private runners + signing).
+#
+# Zero-config: no secrets, environments, or code signing. Uses only the
+# automatic GITHUB_TOKEN when (optionally) publishing a GitHub Release.
+#
+# Output:
+#   codex-x86_64-pc-windows-msvc.zip  (codex.exe + codex-code-mode-host.exe)
+#   plus individual .exe files in the artifact
+#
+# Run:
+#   Actions → rust-release-windows-x64-unsigned → Run workflow
+#   Default: upload Actions artifacts only (no GitHub Release / tag).
+#   Enable "Publish GitHub Release" for a prerelease tag:
+#     windows-x64-unsigned-v{Cargo.toml version}
+#
+# Windows SmartScreen may warn on first run (unsigned). Use More info → Run anyway.
+
+name: rust-release-windows-x64-unsigned
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_github_release:
+        description: Create a GitHub prerelease (and tag) from the built assets
+        required: false
+        type: boolean
+        default: false
+      tag:
+        description: >-
+          Release tag (windows-x64-unsigned-vX.Y.Z[...]). Only used when
+          publishing. Leave empty to use windows-x64-unsigned-v{Cargo.toml version}.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag || 'auto' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-version:
+    if: ${{ inputs.publish_github_release }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag from Cargo.toml / input
+        id: resolve
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_PREFIX: windows-x64-unsigned-v
+        run: |
+          set -euo pipefail
+
+          cargo_ver="$(
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          text = Path("codex-rs/Cargo.toml").read_text()
+          match = re.search(
+              r"(?ms)^\[workspace\.package\]\s*(.*?)^\[",
+              text + "\n[",
+          )
+          if match is None:
+              sys.exit("could not find [workspace.package] in codex-rs/Cargo.toml")
+          section = match.group(1)
+          version_match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', section)
+          if version_match is None:
+              sys.exit("could not find version in [workspace.package]")
+          print(version_match.group(1))
+          PY
+          )"
+
+          if [[ -n "${INPUT_TAG}" ]]; then
+            release_tag="${INPUT_TAG}"
+          else
+            release_tag="${TAG_PREFIX}${cargo_ver}"
+          fi
+
+          version_re='[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?'
+          pattern="^${TAG_PREFIX}${version_re}$"
+          [[ "${release_tag}" =~ ${pattern} ]] \
+            || { echo "❌  Tag '${release_tag}' must match ${TAG_PREFIX}X.Y.Z[...]"; exit 1; }
+
+          tag_ver="${release_tag#"${TAG_PREFIX}"}"
+          [[ "${tag_ver}" == "${cargo_ver}" ]] \
+            || { echo "❌  Tag version ${tag_ver} ≠ Cargo.toml ${cargo_ver}"; exit 1; }
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "release_version=${tag_ver}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "✅  ${release_tag} matches Cargo.toml (${cargo_ver})"
+
+  build:
+    name: Build unsigned Windows x64 EXEs
+    # Free GitHub-hosted Windows (Intel/AMD x64). Not private runner labels.
+    runs-on: windows-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+        shell: bash
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      TARGET: x86_64-pc-windows-msvc
+      # Same CLI surface as the unsigned macOS workflow.
+      BINARIES: "codex codex-code-mode-host"
+      STAGE_DIR: dist/release-assets
+      # Match official Windows x64 sqlite build flag.
+      LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify Windows runner arch
+        shell: pwsh
+        run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          Write-Host "OSArchitecture=$arch"
+          Write-Host "OSVersion=$([System.Environment]::OSVersion.VersionString)"
+          if ($arch -ne 'X64') {
+            throw "Expected X64 Windows runner, got $arch"
+          }
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Configure MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      # Cache crate downloads only (~2–4GB). Do NOT cache codex-rs/target.
+      - name: Cache cargo registry and git deps
+        id: cargo-deps-cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deps-
+
+      - name: Report cargo deps cache status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "cargo-deps cache-hit=${{ steps.cargo-deps-cache.outputs.cache-hit }}"
+          du -sh ~/.cargo/registry ~/.cargo/git 2>/dev/null || true
+
+      # Windows MSVC uses the v8 crate's default upstream prebuilts (not
+      # Codex Darwin/Linux RUSTY_V8_ARCHIVE pairs from setup-rusty-v8).
+
+      - name: Cargo build (release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_args=()
+          for binary in ${BINARIES}; do
+            build_args+=(--bin "$binary")
+          done
+          cargo build --locked --target "${TARGET}" --release "${build_args[@]}"
+
+      - name: Stage EXEs and zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="target/${TARGET}/release"
+          stage="${STAGE_DIR}"
+          zip_name="codex-${TARGET}.zip"
+          zip_root="${RUNNER_TEMP}/codex-windows-zip"
+
+          rm -rf "$stage" "$zip_root"
+          mkdir -p "$stage" "$zip_root"
+
+          for binary in ${BINARIES}; do
+            exe_path="${release_dir}/${binary}.exe"
+            if [[ ! -f "$exe_path" ]]; then
+              echo "Binary ${exe_path} not found" >&2
+              ls -la "$release_dir" || true
+              exit 1
+            fi
+            # Flat names for the zip (easy to run after extract).
+            cp "$exe_path" "${zip_root}/${binary}.exe"
+            # Suffixed copies for the artifact / release assets.
+            cp "$exe_path" "${stage}/${binary}-${TARGET}.exe"
+          done
+
+          # Portable zip for download-and-run (unsigned).
+          (
+            cd "$zip_root"
+            # Git Bash on Windows includes zip; fall back to PowerShell if needed.
+            if command -v zip >/dev/null 2>&1; then
+              zip -9 "${GITHUB_WORKSPACE}/codex-rs/${stage}/${zip_name}" ./*.exe
+            else
+              powershell.exe -NoProfile -Command \
+                "Compress-Archive -Path '*.exe' -DestinationPath '${GITHUB_WORKSPACE}/codex-rs/${stage}/${zip_name}' -Force"
+            fi
+          )
+
+          echo "Staged release assets:"
+          ls -lah "$stage"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: windows-x64-unsigned
+          path: codex-rs/dist/release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: ${{ inputs.publish_github_release }}
+    needs:
+      - resolve-version
+      - build
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: windows-x64-unsigned
+          path: release-assets
+
+      - name: Verify zip present
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="release-assets/codex-x86_64-pc-windows-msvc.zip"
+          if [[ ! -f "$zip" ]]; then
+            echo "❌  ${zip} not found" >&2
+            ls -lahR release-assets || true
+            exit 1
+          fi
+          ls -lah release-assets/
+
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Unsigned Windows x64 (\`x86_64-pc-windows-msvc\`) build."
+            echo
+            echo "Primary asset: \`codex-x86_64-pc-windows-msvc.zip\`"
+            echo
+            echo "Contents: \`codex.exe\` and \`codex-code-mode-host.exe\` (unsigned)."
+            echo "SmartScreen may warn on first run — More info → Run anyway."
+            echo
+            echo "Built from \`${GITHUB_SHA}\`."
+            echo
+            git log -1 --format=%B "${GITHUB_SHA}^{commit}"
+          } > "${notes_path}"
+          echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ needs.resolve-version.outputs.release_version }} (windows-x64-unsigned)
+          tag_name: ${{ needs.resolve-version.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: release-assets/*
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: false
+          prerelease: true

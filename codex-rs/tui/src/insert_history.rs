@@ -111,17 +111,18 @@ where
     B: Backend + Write,
 {
     let screen_size = terminal.backend().size().unwrap_or(Size::new(0, 0));
-    let lines = if terminal.full_transparency() {
+    // Only clone when stripping backgrounds; otherwise keep the borrowed slice.
+    let stripped_lines = terminal.full_transparency().then(|| {
         lines
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|mut line| {
                 line.line = crate::transparent_background::strip_line_backgrounds(line.line);
                 line
             })
-            .collect()
-    } else {
-        lines
-    };
+            .collect::<Vec<_>>()
+    });
+    let lines = stripped_lines.as_deref().unwrap_or(lines);
 
     let mut area = terminal.viewport_area;
     let mut should_update_area = false;

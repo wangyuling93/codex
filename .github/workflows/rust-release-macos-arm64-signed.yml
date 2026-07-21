@@ -159,6 +159,13 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # Match Grok's effective `--release` profile in CI: Grok's workflow also
+      # disables incremental compilation, while its release profile otherwise
+      # uses Cargo's defaults (no LTO, 16 codegen units, and no debug info).
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_DEBUG: "false"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_PANIC: "abort"
       SCCACHE_CACHE_SIZE: 10G
       TARGET: aarch64-apple-darwin
       # Original fork-local CLI pair.

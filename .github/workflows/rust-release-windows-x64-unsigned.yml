@@ -7,7 +7,8 @@
 # automatic GITHUB_TOKEN when (optionally) publishing a GitHub Release.
 #
 # Output:
-#   codex-x86_64-pc-windows-msvc.zip  (codex.exe)
+#   codex-x86_64-pc-windows-msvc.zip
+#     (codex.exe + codex-code-mode-host.exe)
 #   plus individual .exe files in the artifact
 #
 # Run:
@@ -121,8 +122,8 @@ jobs:
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       TARGET: x86_64-pc-windows-msvc
-      # Terminal CLI entrypoint only, matching the unsigned macOS workflow.
-      BINARIES: "codex"
+      # Original fork-local CLI pair.
+      BINARIES: "codex codex-code-mode-host"
       STAGE_DIR: dist/release-assets
       # Match official Windows x64 sqlite build flag.
       LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
@@ -278,7 +279,7 @@ jobs:
             echo
             echo "Primary asset: \`codex-x86_64-pc-windows-msvc.zip\`"
             echo
-            echo "Contents: \`codex.exe\` (unsigned)."
+            echo "Contents: \`codex.exe\` and \`codex-code-mode-host.exe\` (unsigned)."
             echo "SmartScreen may warn on first run — More info → Run anyway."
             echo
             echo "Built from \`${GITHUB_SHA}\`."

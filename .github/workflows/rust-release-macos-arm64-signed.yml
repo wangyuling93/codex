@@ -1,0 +1,623 @@
+# Fork-local Apple Silicon release: signed and notarized aarch64-apple-darwin
+# DMG containing the Codex terminal CLI and its code-mode host.
+#
+# Separate from the canonical multi-platform `rust-release.yml` so this path
+# does not own or replace official release semantics.
+#
+# The build job stays unprivileged; signing values are only exposed to the
+# protected `codesigning` GitHub environment job:
+#   secrets: APPLE_DEVELOPER_ID_P12, APPLE_DEVELOPER_ID_P12_PASSWORD,
+#            APPLE_APP_SPECIFIC_PASSWORD
+#   variables: APPLE_ID, APPLE_TEAM_ID
+#
+# Output:
+#   codex-aarch64-apple-darwin.dmg  (+ signed .tar.gz binaries)
+#
+# Run:
+#   Actions → rust-release-macos-arm64-signed → Run workflow
+#   Default: upload Actions artifacts only (no GitHub Release / tag).
+#   Enable "Publish GitHub Release" to create a prerelease tag:
+#     macos-arm64-v{Cargo.toml version}
+
+name: rust-release-macos-arm64-signed
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_github_release:
+        description: Create a GitHub prerelease (and tag) from the built assets
+        required: false
+        type: boolean
+        default: false
+      tag:
+        description: >-
+          Release tag (macos-arm64-vX.Y.Z[...]). Only used when publishing.
+          Leave empty to use macos-arm64-v{Cargo.toml version}.
+        required: false
+        type: string
+        default: ""
+
+# Default token is read-only; the publish job elevates to write.
+permissions:
+  contents: read
+
+# Do not cancel in-progress release builds when re-triggered.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag || 'auto' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-version:
+    if: ${{ inputs.publish_github_release }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve release tag from Cargo.toml / input
+        id: resolve
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_PREFIX: macos-arm64-v
+        run: |
+          set -euo pipefail
+
+          # Read [workspace.package] version only — not the first "version ="
+          # under [workspace.dependencies].
+          cargo_ver="$(
+            python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          text = Path("codex-rs/Cargo.toml").read_text()
+          match = re.search(
+              r"(?ms)^\[workspace\.package\]\s*(.*?)^\[",
+              text + "\n[",
+          )
+          if match is None:
+              sys.exit("could not find [workspace.package] in codex-rs/Cargo.toml")
+          section = match.group(1)
+          version_match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', section)
+          if version_match is None:
+              sys.exit("could not find version in [workspace.package]")
+          print(version_match.group(1))
+          PY
+          )"
+
+          if [[ -n "${INPUT_TAG}" ]]; then
+            release_tag="${INPUT_TAG}"
+          else
+            release_tag="${TAG_PREFIX}${cargo_ver}"
+          fi
+
+          version_re='[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?'
+          pattern="^${TAG_PREFIX}${version_re}$"
+          [[ "${release_tag}" =~ ${pattern} ]] \
+            || { echo "❌  Tag '${release_tag}' must match ${TAG_PREFIX}X.Y.Z[...]"; exit 1; }
+
+          tag_ver="${release_tag#"${TAG_PREFIX}"}"
+          [[ "${tag_ver}" == "${cargo_ver}" ]] \
+            || { echo "❌  Tag version ${tag_ver} ≠ Cargo.toml ${cargo_ver}"; exit 1; }
+
+          {
+            echo "release_tag=${release_tag}"
+            echo "release_version=${tag_ver}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "✅  ${release_tag} matches Cargo.toml (${cargo_ver})"
+
+  build:
+    name: Build arm64 binaries
+    # macOS 26 Tahoe arm64. Image ships Xcode 26.x; default tracks the OS line.
+    # No explicit xcode-select needed for Cargo/CLI + hdiutil DMG builds.
+    runs-on: macos-26
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      SCCACHE_CACHE_SIZE: 10G
+      TARGET: aarch64-apple-darwin
+      # Original fork-local CLI pair.
+      BINARIES: "codex codex-code-mode-host"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify macOS / Xcode toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          # Fail if the image default is not Xcode 26.x (same major as macos-26).
+          xcodebuild -version | head -n 1 | grep -E 'Xcode 26\.'
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Restore sccache cache (fallback)
+        if: ${{ env.SCCACHE_GHA_ENABLED != 'true' }}
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-${{ runner.os }}-${{ env.TARGET }}-release-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-${{ runner.os }}-${{ env.TARGET }}-release-${{ hashFiles('codex-rs/Cargo.lock') }}-
+            sccache-${{ runner.os }}-${{ env.TARGET }}-release-
+
+      # Cache crate downloads only (~2–4GB; well under GHA limits).
+      # Do NOT cache codex-rs/target (can be 100GB+ locally / multi-GB in CI).
+      # First successful run: Cache miss → download crates → save cache at job end.
+      # Later runs: Cache hit → skip most "Downloading crates" (compile still full).
+      - name: Cache cargo registry and git deps
+        id: cargo-deps-cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deps-
+
+      - name: Report cargo deps cache status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "cargo-deps cache-hit=${{ steps.cargo-deps-cache.outputs.cache-hit }}"
+          du -sh ~/.cargo/registry ~/.cargo/git 2>/dev/null || true
+
+      - name: Configure rusty_v8 prebuilt artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Cargo build (release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_args=()
+          for binary in ${BINARIES}; do
+            build_args+=(--bin "$binary")
+          done
+          cargo build --locked --target "${TARGET}" --release --timings "${build_args[@]}"
+
+      - name: Upload Cargo timings
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-macos-arm64
+          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: Strip release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS strip only — no unused symbols tarball side product.
+          for binary in ${BINARIES}; do
+            binary_path="target/${TARGET}/release/${binary}"
+            if [[ ! -f "$binary_path" ]]; then
+              echo "Binary ${binary_path} not found" >&2
+              exit 1
+            fi
+            strip -S -x "$binary_path"
+          done
+
+      - name: Upload unsigned binaries for signing
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: macos-arm64-unsigned-binaries
+          path: |
+            codex-rs/target/aarch64-apple-darwin/release/codex
+            codex-rs/target/aarch64-apple-darwin/release/codex-code-mode-host
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.SCCACHE_GHA_ENABLED != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-${{ runner.os }}-${{ env.TARGET }}-release-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.run_id }}
+
+      - name: Report sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats || true
+
+  sign-and-package:
+    needs: build
+    name: Sign, notarize, and staple arm64 DMG
+    runs-on: macos-26
+    timeout-minutes: 180
+    environment:
+      name: codesigning
+      deployment: false
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      BINARIES: "codex codex-code-mode-host"
+      STAGE_DIR: dist/release-assets
+      TARGET: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download unsigned binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-arm64-unsigned-binaries
+          path: codex-rs/target/aarch64-apple-darwin/release
+
+      - name: Import Developer ID certificate and notarization credentials
+        shell: bash
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_ID: ${{ vars.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing codesigning secret APPLE_APP_SPECIFIC_PASSWORD}"
+          : "${APPLE_DEVELOPER_ID_P12:?Missing codesigning secret APPLE_DEVELOPER_ID_P12}"
+          : "${APPLE_DEVELOPER_ID_P12_PASSWORD:?Missing codesigning secret APPLE_DEVELOPER_ID_P12_PASSWORD}"
+          : "${APPLE_ID:?Missing codesigning variable APPLE_ID}"
+          : "${APPLE_TEAM_ID:?Missing codesigning variable APPLE_TEAM_ID}"
+
+          certificate_path="${RUNNER_TEMP}/developer-id-application.p12"
+          keychain_path="${RUNNER_TEMP}/codex-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          notary_profile="codex-notary-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "::add-mask::${keychain_password}"
+
+          printf '%s' "$APPLE_DEVELOPER_ID_P12" | base64 --decode >"$certificate_path"
+          chmod 0600 "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          signing_identity="$({
+            security find-identity -v -p codesigning "$keychain_path" || true
+          } | awk '/Developer ID Application:/ { print $2; exit }')"
+          if [[ -z "$signing_identity" ]]; then
+            echo "No Developer ID Application identity was imported" >&2
+            security find-identity -v -p codesigning "$keychain_path" || true
+            exit 1
+          fi
+
+          xcrun notarytool store-credentials "$notary_profile" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --keychain "$keychain_path" \
+            --validate
+
+          {
+            echo "NOTARY_PROFILE=${notary_profile}"
+            echo "SIGNING_IDENTITY=${signing_identity}"
+            echo "SIGNING_KEYCHAIN_PATH=${keychain_path}"
+          } >> "$GITHUB_ENV"
+
+      - name: Sign and verify binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for binary in ${BINARIES}; do
+            binary_path="target/${TARGET}/release/${binary}"
+            entitlements="${GITHUB_WORKSPACE}/.github/scripts/macos-signing/${binary}.entitlements.plist"
+            chmod 0755 "$binary_path"
+
+            "${GITHUB_WORKSPACE}/.github/scripts/macos-signing/sign_macos_code.sh" \
+              --target "$binary_path" \
+              --identity "$SIGNING_IDENTITY" \
+              --deep false \
+              --identifier "$binary" \
+              --options runtime \
+              --timestamp true \
+              --entitlements "$entitlements"
+
+            lipo "$binary_path" -verify_arch arm64
+            codesign --verify --strict --verbose=2 "$binary_path"
+
+            actual_entitlements="$(mktemp)"
+            normalized_actual="$(mktemp)"
+            normalized_expected="$(mktemp)"
+            codesign -d --entitlements :- "$binary_path" >"$actual_entitlements"
+            plutil -convert xml1 -o "$normalized_actual" "$actual_entitlements"
+            plutil -convert xml1 -o "$normalized_expected" "$entitlements"
+            diff -u "$normalized_expected" "$normalized_actual"
+            rm -f "$actual_entitlements" "$normalized_actual" "$normalized_expected"
+          done
+
+      - name: Notarize signed binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="target/${TARGET}/release"
+          report_dir="${GITHUB_WORKSPACE}/macos-notarization/${TARGET}"
+          mkdir -p "$report_dir"
+          for binary in ${BINARIES}; do
+            binary_path="${release_dir}/${binary}"
+            archive_path="${RUNNER_TEMP}/${binary}-notarization.zip"
+            report_path="${report_dir}/${binary}-notarytool-submit.json"
+            rm -f "$archive_path"
+            (
+              cd "$release_dir"
+              zip -q "$archive_path" "$binary"
+            )
+
+            xcrun notarytool submit "$archive_path" \
+              --keychain-profile "$NOTARY_PROFILE" \
+              --keychain "$SIGNING_KEYCHAIN_PATH" \
+              --wait \
+              --timeout 45m \
+              --output-format json \
+              | tee "$report_path"
+
+            python3 - "$report_path" "$binary" <<'PY'
+          import json
+          import sys
+
+          report_path = sys.argv[1]
+          binary = sys.argv[2]
+          with open(report_path, encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          if report.get("status") != "Accepted":
+              raise SystemExit(f"{binary} notarization was not accepted: {report}")
+          PY
+
+            shasum -a 256 "$binary_path" >"${report_dir}/${binary}-sha256.txt"
+          done
+
+      - name: Build DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="target/${TARGET}/release"
+          dmg_root="${RUNNER_TEMP}/codex-dmg-root"
+          dmg_path="${release_dir}/codex-${TARGET}.dmg"
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root"
+          for binary in ${BINARIES}; do
+            ditto "${release_dir}/${binary}" "${dmg_root}/${binary}"
+          done
+
+          rm -f "$dmg_path"
+          hdiutil create \
+            -volname "Codex (${TARGET})" \
+            -srcfolder "$dmg_root" \
+            -format UDZO \
+            -ov \
+            "$dmg_path"
+
+      - name: Sign, notarize, and staple DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_path="target/${TARGET}/release/codex-${TARGET}.dmg"
+          report_dir="${GITHUB_WORKSPACE}/macos-notarization/${TARGET}"
+          report_path="${report_dir}/dmg-notarytool-submit.json"
+          mkdir -p "$report_dir"
+
+          "${GITHUB_WORKSPACE}/.github/scripts/macos-signing/sign_macos_code.sh" \
+            --target "$dmg_path" \
+            --identity "$SIGNING_IDENTITY" \
+            --deep false \
+            --timestamp true
+
+          codesign --verify --strict --verbose=2 "$dmg_path"
+          xcrun notarytool submit "$dmg_path" \
+            --keychain-profile "$NOTARY_PROFILE" \
+            --keychain "$SIGNING_KEYCHAIN_PATH" \
+            --wait \
+            --timeout 45m \
+            --output-format json \
+            | tee "$report_path"
+
+          python3 - "$report_path" <<'PY'
+          import json
+          import sys
+
+          report_path = sys.argv[1]
+          with open(report_path, encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          if report.get("status") != "Accepted":
+              raise SystemExit(f"Notarization was not accepted: {report}")
+          PY
+
+          xcrun stapler staple -v "$dmg_path"
+          xcrun stapler validate -v "$dmg_path"
+          shasum -a 256 "$dmg_path" >"${report_dir}/dmg-sha256.txt"
+
+      - name: Verify and stage signed release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="target/${TARGET}/release"
+          dmg_name="codex-${TARGET}.dmg"
+          dmg_path="${release_dir}/${dmg_name}"
+          mount_dir="${RUNNER_TEMP}/codex-dmg-mount"
+          stage="${STAGE_DIR}"
+
+          hdiutil verify "$dmg_path"
+          codesign --verify --strict --verbose=2 "$dmg_path"
+          xcrun stapler validate -v "$dmg_path"
+
+          rm -rf "$mount_dir"
+          mkdir -p "$mount_dir"
+          hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir"
+          cleanup_mount() {
+            hdiutil detach "$mount_dir" >/dev/null
+          }
+          trap cleanup_mount EXIT
+          for binary in ${BINARIES}; do
+            lipo "${mount_dir}/${binary}" -verify_arch arm64
+            codesign --verify --strict --verbose=2 "${mount_dir}/${binary}"
+          done
+          cleanup_mount
+          trap - EXIT
+
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp "$dmg_path" "${stage}/${dmg_name}"
+          for binary in ${BINARIES}; do
+            cp "${release_dir}/${binary}" "${stage}/${binary}-${TARGET}"
+            tar -C "$stage" \
+              -czf "${stage}/${binary}-${TARGET}.tar.gz" \
+              "${binary}-${TARGET}"
+            rm -f "${stage}/${binary}-${TARGET}"
+          done
+          ls -lah "$stage"
+
+      - name: Upload signed release assets
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: macos-arm64-signed
+          path: codex-rs/dist/release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload notarization report
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: macos-arm64-notarization
+          path: macos-notarization/aarch64-apple-darwin/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Delete temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          fi
+          rm -f "${RUNNER_TEMP}/developer-id-application.p12"
+
+  publish:
+    if: ${{ inputs.publish_github_release }}
+    needs:
+      - resolve-version
+      - sign-and-package
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: macos-arm64-signed
+          path: release-assets
+
+      - name: Verify DMG present
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="release-assets/codex-aarch64-apple-darwin.dmg"
+          if [[ ! -f "$dmg" ]]; then
+            echo "❌  ${dmg} not found" >&2
+            ls -lahR release-assets || true
+            exit 1
+          fi
+          ls -lah release-assets/
+
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo "Signed, notarized, and stapled Apple Silicon (aarch64-apple-darwin) build."
+            echo
+            echo "Primary asset: \`codex-aarch64-apple-darwin.dmg\`"
+            echo
+            echo "Contents: \`codex\` and \`codex-code-mode-host\`."
+            echo
+            echo "Built from \`${GITHUB_SHA}\`."
+            echo
+            git log -1 --format=%B "${GITHUB_SHA}^{commit}"
+          } > "${notes_path}"
+          echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ${{ needs.resolve-version.outputs.release_version }} (macos-arm64)
+          tag_name: ${{ needs.resolve-version.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: release-assets/*
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: false
+          prerelease: true

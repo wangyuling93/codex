@@ -11,7 +11,7 @@
 #   variables: APPLE_ID, APPLE_TEAM_ID
 #
 # Output:
-#   codex-aarch64-apple-darwin.dmg  (+ signed .tar.gz binaries)
+#   codex-aarch64-apple-darwin.dmg
 #
 # Run:
 #   Actions → rust-release-macos-arm64-signed → Run workflow
@@ -488,7 +488,7 @@ jobs:
           xcrun stapler validate -v "$dmg_path"
           shasum -a 256 "$dmg_path" >"${report_dir}/dmg-sha256.txt"
 
-      - name: Verify and stage signed release assets
+      - name: Verify and stage signed DMG
         shell: bash
         run: |
           set -euo pipefail
@@ -520,20 +520,13 @@ jobs:
           rm -rf "$stage"
           mkdir -p "$stage"
           cp "$dmg_path" "${stage}/${dmg_name}"
-          for binary in ${BINARIES}; do
-            cp "${release_dir}/${binary}" "${stage}/${binary}-${TARGET}"
-            tar -C "$stage" \
-              -czf "${stage}/${binary}-${TARGET}.tar.gz" \
-              "${binary}-${TARGET}"
-            rm -f "${stage}/${binary}-${TARGET}"
-          done
           ls -lah "$stage"
 
       - name: Upload signed release assets
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: macos-arm64-signed
-          path: codex-rs/dist/release-assets/*
+          path: codex-rs/dist/release-assets/codex-aarch64-apple-darwin.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -616,7 +609,7 @@ jobs:
           tag_name: ${{ needs.resolve-version.outputs.release_tag }}
           target_commitish: ${{ github.sha }}
           body_path: ${{ steps.notes.outputs.path }}
-          files: release-assets/*
+          files: release-assets/codex-aarch64-apple-darwin.dmg
           overwrite_files: true
           fail_on_unmatched_files: true
           make_latest: false

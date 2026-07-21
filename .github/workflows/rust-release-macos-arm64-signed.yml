@@ -1,5 +1,5 @@
 # Fork-local Apple Silicon release: signed and notarized aarch64-apple-darwin
-# DMG containing the Codex terminal CLI and its code-mode host.
+# DMG containing only the Codex terminal CLI.
 #
 # Separate from the canonical multi-platform `rust-release.yml` so this path
 # does not own or replace official release semantics.
@@ -168,8 +168,8 @@ jobs:
       CARGO_PROFILE_RELEASE_PANIC: "abort"
       SCCACHE_CACHE_SIZE: 10G
       TARGET: aarch64-apple-darwin
-      # Original fork-local CLI pair.
-      BINARIES: "codex codex-code-mode-host"
+      # Match the Homebrew cask's CLI-only package.
+      BINARIES: "codex"
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -348,9 +348,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: macos-arm64-unsigned-binaries
-          path: |
-            codex-rs/target/aarch64-apple-darwin/release/codex
-            codex-rs/target/aarch64-apple-darwin/release/codex-code-mode-host
+          path: codex-rs/target/aarch64-apple-darwin/release/codex
           if-no-files-found: error
           retention-days: 1
 
@@ -397,7 +395,7 @@ jobs:
       run:
         working-directory: codex-rs
     env:
-      BINARIES: "codex codex-code-mode-host"
+      BINARIES: "codex"
       STAGE_DIR: dist/release-assets
       TARGET: aarch64-apple-darwin
 
@@ -715,7 +713,7 @@ jobs:
             echo
             echo "Primary asset: \`codex-aarch64-apple-darwin.dmg\`"
             echo
-            echo "Contents: \`codex\` and \`codex-code-mode-host\`."
+            echo "Contents: \`codex\`."
             echo
             echo "Built from \`${GITHUB_SHA}\`."
             echo

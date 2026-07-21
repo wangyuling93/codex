@@ -506,47 +506,6 @@ jobs:
             rm -f "$actual_entitlements" "$normalized_actual" "$normalized_expected"
           done
 
-      - name: Notarize signed binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          release_dir="target/${TARGET}/release"
-          report_dir="${GITHUB_WORKSPACE}/macos-notarization/${TARGET}"
-          mkdir -p "$report_dir"
-          for binary in ${BINARIES}; do
-            binary_path="${release_dir}/${binary}"
-            archive_path="${RUNNER_TEMP}/${binary}-notarization.zip"
-            report_path="${report_dir}/${binary}-notarytool-submit.json"
-            rm -f "$archive_path"
-            (
-              cd "$release_dir"
-              zip -q "$archive_path" "$binary"
-            )
-
-            xcrun notarytool submit "$archive_path" \
-              --keychain-profile "$NOTARY_PROFILE" \
-              --keychain "$SIGNING_KEYCHAIN_PATH" \
-              --wait \
-              --timeout 45m \
-              --output-format json \
-              | tee "$report_path"
-
-            python3 - "$report_path" "$binary" <<'PY'
-          import json
-          import sys
-
-          report_path = sys.argv[1]
-          binary = sys.argv[2]
-          with open(report_path, encoding="utf-8") as report_file:
-              report = json.load(report_file)
-          if report.get("status") != "Accepted":
-              raise SystemExit(f"{binary} notarization was not accepted: {report}")
-          PY
-
-            shasum -a 256 "$binary_path" >"${report_dir}/${binary}-sha256.txt"
-          done
-
       - name: Build DMG
         shell: bash
         run: |

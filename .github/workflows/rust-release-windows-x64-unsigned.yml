@@ -13,8 +13,9 @@
 # Run:
 #   Actions → rust-release-windows-x64-unsigned → Run workflow
 #   Default: upload Actions artifacts only (no GitHub Release / tag).
+#   Leave release_version empty to use the latest stable openai/codex release.
 #   Enable "Publish GitHub Release" for a prerelease tag:
-#     windows-x64-unsigned-v{Cargo.toml version}
+#     windows-x64-unsigned-v{resolved release version}
 #
 # Windows SmartScreen may warn on first run (unsigned). Use More info → Run anyway.
 
@@ -28,10 +29,17 @@ on:
         required: false
         type: boolean
         default: false
+      release_version:
+        description: >-
+          Version embedded in the binaries. Leave empty to use the latest
+          stable openai/codex release (for example, 0.144.6).
+        required: false
+        type: string
+        default: ""
       tag:
         description: >-
-          Release tag (windows-x64-unsigned-vX.Y.Z[...]). Only used when
-          publishing. Leave empty to use windows-x64-unsigned-v{Cargo.toml version}.
+          Optional release tag (windows-x64-unsigned-vX.Y.Z[...]). Its version
+          is used when release_version is empty. Otherwise the two must match.
         required: false
         type: string
         default: ""
@@ -40,12 +48,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tag || 'auto' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || inputs.tag || 'latest-stable' }}
   cancel-in-progress: false
 
 jobs:
   resolve-version:
-    if: ${{ inputs.publish_github_release }}
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
@@ -55,16 +62,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve release tag from Cargo.toml / input
+      - name: Resolve release version and tag
         id: resolve
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
           INPUT_TAG: ${{ inputs.tag }}
           TAG_PREFIX: windows-x64-unsigned-v
         run: |
           set -euo pipefail
 
-          cargo_ver="$(
+          source_version="$(
             python3 - <<'PY'
           from pathlib import Path
           import re
@@ -85,29 +94,55 @@ jobs:
           PY
           )"
 
+          version_re='[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?'
+
+          if [[ -n "${INPUT_RELEASE_VERSION}" ]]; then
+            release_version="${INPUT_RELEASE_VERSION}"
+            version_source="workflow input"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            [[ "${INPUT_TAG}" == "${TAG_PREFIX}"* ]] \
+              || { echo "❌  Tag '${INPUT_TAG}' must start with ${TAG_PREFIX}"; exit 1; }
+            release_version="${INPUT_TAG#"${TAG_PREFIX}"}"
+            version_source="workflow tag input"
+          elif [[ "${source_version}" != "0.0.0" ]]; then
+            release_version="${source_version}"
+            version_source="Cargo.toml"
+          else
+            upstream_tag="$(gh api repos/openai/codex/releases/latest --jq .tag_name)"
+            [[ "${upstream_tag}" =~ ^rust-v${version_re}$ ]] \
+              || { echo "❌  Latest openai/codex release tag '${upstream_tag}' is unsupported"; exit 1; }
+            release_version="${upstream_tag#rust-v}"
+            version_source="latest stable openai/codex release"
+          fi
+
+          [[ "${release_version}" =~ ^${version_re}$ ]] \
+            || { echo "❌  Release version '${release_version}' is unsupported"; exit 1; }
+          [[ "${release_version}" != "0.0.0" ]] \
+            || { echo "❌  Refusing to publish or embed the development placeholder 0.0.0"; exit 1; }
+
           if [[ -n "${INPUT_TAG}" ]]; then
             release_tag="${INPUT_TAG}"
           else
-            release_tag="${TAG_PREFIX}${cargo_ver}"
+            release_tag="${TAG_PREFIX}${release_version}"
           fi
 
-          version_re='[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?'
           pattern="^${TAG_PREFIX}${version_re}$"
           [[ "${release_tag}" =~ ${pattern} ]] \
             || { echo "❌  Tag '${release_tag}' must match ${TAG_PREFIX}X.Y.Z[...]"; exit 1; }
 
           tag_ver="${release_tag#"${TAG_PREFIX}"}"
-          [[ "${tag_ver}" == "${cargo_ver}" ]] \
-            || { echo "❌  Tag version ${tag_ver} ≠ Cargo.toml ${cargo_ver}"; exit 1; }
+          [[ "${tag_ver}" == "${release_version}" ]] \
+            || { echo "❌  Tag version ${tag_ver} ≠ release version ${release_version}"; exit 1; }
 
           {
             echo "release_tag=${release_tag}"
-            echo "release_version=${tag_ver}"
+            echo "release_version=${release_version}"
           } >> "${GITHUB_OUTPUT}"
 
-          echo "✅  ${release_tag} matches Cargo.toml (${cargo_ver})"
+          echo "✅  Codex ${release_version} from ${version_source}; release tag ${release_tag}"
 
   build:
+    needs: resolve-version
     name: Build unsigned Windows x64 EXEs
     # Free GitHub-hosted Windows (Intel/AMD x64). Not private runner labels.
     runs-on: windows-latest
@@ -131,6 +166,46 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Set Codex build version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.resolve-version.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            python_cmd=python3
+          else
+            python_cmd=python
+          fi
+
+          "$python_cmd" - "$RELEASE_VERSION" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version = sys.argv[1]
+          cargo_toml = Path("Cargo.toml")
+          text = cargo_toml.read_text(encoding="utf-8")
+          section = re.search(
+              r"(?ms)^\[workspace\.package\]\s*(.*?)(?=^\[|\Z)",
+              text,
+          )
+          if section is None:
+              raise SystemExit("could not find [workspace.package] in Cargo.toml")
+          version_match = re.search(
+              r'(?m)^(version\s*=\s*")([^"]+)("\s*)$',
+              section.group(1),
+          )
+          if version_match is None:
+              raise SystemExit("could not find [workspace.package].version")
+
+          old_version = version_match.group(2)
+          start = section.start(1) + version_match.start(2)
+          end = section.start(1) + version_match.end(2)
+          cargo_toml.write_text(text[:start] + version + text[end:], encoding="utf-8")
+          print(f"Set [workspace.package].version from {old_version} to {version}")
+          PY
 
       - name: Verify Windows runner arch
         shell: pwsh
@@ -183,6 +258,17 @@ jobs:
             build_args+=(--bin "$binary")
           done
           cargo build --locked --target "${TARGET}" --release "${build_args[@]}"
+
+      - name: Verify embedded Codex version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.resolve-version.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          version_output="$("target/${TARGET}/release/codex.exe" --version)"
+          echo "$version_output"
+          [[ "$version_output" == *"${RELEASE_VERSION}"* ]] \
+            || { echo "Expected codex.exe --version to contain ${RELEASE_VERSION}" >&2; exit 1; }
 
       - name: Stage portable zip
         shell: bash

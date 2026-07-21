@@ -507,7 +507,7 @@ jobs:
           mkdir -p "$mount_dir"
           hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir"
           cleanup_mount() {
-            hdiutil detach "$mount_dir" >/dev/null
+            diskutil eject "$mount_dir" >/dev/null
           }
           trap cleanup_mount EXIT
           for binary in ${BINARIES}; do

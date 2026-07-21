@@ -145,6 +145,29 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      # Cache crate downloads only (~2–4GB; well under GHA limits).
+      # Do NOT cache codex-rs/target (can be 100GB+ locally / multi-GB in CI).
+      # First successful run: Cache miss → download crates → save cache at job end.
+      # Later runs: Cache hit → skip most "Downloading crates" (compile still full).
+      - name: Cache cargo registry and git deps
+        id: cargo-deps-cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-deps-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deps-
+
+      - name: Report cargo deps cache status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "cargo-deps cache-hit=${{ steps.cargo-deps-cache.outputs.cache-hit }}"
+          du -sh ~/.cargo/registry ~/.cargo/git 2>/dev/null || true
+
       - name: Configure rusty_v8 prebuilt artifacts
         uses: ./.github/actions/setup-rusty-v8
         with:

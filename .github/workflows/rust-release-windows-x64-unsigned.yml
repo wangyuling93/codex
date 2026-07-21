@@ -9,7 +9,6 @@
 # Output:
 #   codex-x86_64-pc-windows-msvc.zip
 #     (codex.exe + codex-code-mode-host.exe)
-#   plus individual .exe files in the artifact
 #
 # Run:
 #   Actions → rust-release-windows-x64-unsigned → Run workflow
@@ -185,7 +184,7 @@ jobs:
           done
           cargo build --locked --target "${TARGET}" --release "${build_args[@]}"
 
-      - name: Stage EXEs and zip
+      - name: Stage portable zip
         shell: bash
         run: |
           set -euo pipefail
@@ -207,8 +206,6 @@ jobs:
             fi
             # Flat names for the zip (easy to run after extract).
             cp "$exe_path" "${zip_root}/${binary}.exe"
-            # Suffixed copies for the artifact / release assets.
-            cp "$exe_path" "${stage}/${binary}-${TARGET}.exe"
           done
 
           # Portable zip for download-and-run (unsigned).
@@ -230,7 +227,7 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: windows-x64-unsigned
-          path: codex-rs/dist/release-assets/*
+          path: codex-rs/dist/release-assets/codex-x86_64-pc-windows-msvc.zip
           if-no-files-found: error
           retention-days: 14
 

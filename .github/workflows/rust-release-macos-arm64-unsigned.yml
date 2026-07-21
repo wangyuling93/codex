@@ -123,8 +123,8 @@ jobs:
       CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       TARGET: aarch64-apple-darwin
-      # CLI entrypoint + code-mode host (what a local DMG needs).
-      BINARIES: "codex codex-code-mode-host"
+      # Terminal CLI entrypoint only.
+      BINARIES: "codex"
       STAGE_DIR: dist/release-assets
 
     steps:

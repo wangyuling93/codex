@@ -166,6 +166,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseEvent;
 use rand::Rng;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

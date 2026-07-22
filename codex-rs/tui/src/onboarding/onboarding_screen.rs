@@ -506,6 +506,7 @@ pub(crate) async fn run_onboarding_app(
                                 .await;
                             }
                         }
+                        TuiEvent::Mouse(_) => {}
                         TuiEvent::Paste(text) => {
                             onboarding_screen.handle_paste(text);
                         }

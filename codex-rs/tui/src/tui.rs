@@ -18,10 +18,14 @@ use crossterm::SynchronizedUpdate;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableFocusChange;
+use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableBracketedPaste;
 #[cfg(not(windows))]
 use crossterm::event::EnableFocusChange;
+#[cfg(windows)]
+use crossterm::event::EnableMouseCapture;
 use crossterm::event::KeyEvent;
+use crossterm::event::MouseEvent;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 #[cfg(not(unix))]
@@ -109,6 +113,26 @@ mod tests {
     use ratatui::layout::Position;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn composer_mouse_capture_enables_button_drag_without_pointer_motion() {
+        use crossterm::Command as _;
+
+        let mut enabled = String::new();
+        super::EnableComposerMouseCapture
+            .write_ansi(&mut enabled)
+            .expect("serialize composer mouse capture");
+        let mut disabled = String::new();
+        crossterm::event::DisableMouseCapture
+            .write_ansi(&mut disabled)
+            .expect("serialize mouse capture disable");
+
+        assert_eq!(enabled, "\u{1b}[?1002h\u{1b}[?1006h");
+        assert!(!enabled.contains("?1003h"));
+        assert!(disabled.contains("?1002l"));
+        assert!(disabled.contains("?1006l"));
+    }
 
     #[test]
     fn unfocused_notification_condition_is_suppressed_when_focused() {
@@ -213,11 +237,21 @@ mod tests {
 pub fn set_modes() -> Result<()> {
     ensure_virtual_terminal_processing()?;
 
+    let mut rollback = ModeSetupRollback {
+        bracketed_paste: true,
+        ..Default::default()
+    };
     execute!(stdout(), EnableBracketedPaste)?;
 
+    rollback.raw_mode = true;
     enable_raw_mode()?;
     #[cfg(windows)]
-    windows_console::set_input_record_mode()?;
+    {
+        windows_console::set_input_record_mode()?;
+        rollback.input_record_mode = true;
+    }
+    rollback.mouse_capture = true;
+    enable_composer_mouse_capture()?;
     // Enable keyboard enhancement flags so modifiers for keys like Enter are disambiguated.
     // chat_composer.rs is using a keyboard event listener to enter for any modified keys
     // to create a new line that require this.
@@ -230,6 +264,70 @@ pub fn set_modes() -> Result<()> {
     let _ = execute!(stdout(), EnableFocusChange);
     #[cfg(windows)]
     let _ = execute!(stdout(), DisableFocusChange);
+    rollback.disarm();
+    Ok(())
+}
+
+/// Best-effort rollback for a partially completed [`set_modes`] call.
+///
+/// Flags are armed before each fallible transition so a command that writes only part of its
+/// escape sequence is still paired with the corresponding disable command.
+#[derive(Debug, Default)]
+struct ModeSetupRollback {
+    bracketed_paste: bool,
+    raw_mode: bool,
+    #[cfg(windows)]
+    input_record_mode: bool,
+    mouse_capture: bool,
+    disarmed: bool,
+}
+
+impl ModeSetupRollback {
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for ModeSetupRollback {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        if self.mouse_capture {
+            let _ = execute!(stdout(), DisableMouseCapture);
+        }
+        if self.bracketed_paste {
+            let _ = execute!(stdout(), DisableBracketedPaste);
+        }
+        if self.raw_mode {
+            let _ = disable_raw_mode();
+        }
+        #[cfg(windows)]
+        if self.input_record_mode {
+            let _ = windows_console::restore_input_mode();
+        }
+    }
+}
+
+/// Enable button press/release and drag reports without the unpressed pointer-motion reports
+/// enabled by crossterm's full mouse capture command. Hover motion is unnecessary for composer hit
+/// testing and can otherwise flood the input stream whenever the pointer moves over the terminal.
+#[cfg(not(windows))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableComposerMouseCapture;
+
+#[cfg(not(windows))]
+impl Command for EnableComposerMouseCapture {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        write!(f, "\x1b[?1002h\x1b[?1006h")
+    }
+}
+
+fn enable_composer_mouse_capture() -> Result<()> {
+    #[cfg(windows)]
+    execute!(stdout(), EnableMouseCapture)?;
+    #[cfg(not(windows))]
+    execute!(stdout(), EnableComposerMouseCapture)?;
     Ok(())
 }
 
@@ -299,6 +397,9 @@ fn restore_common(
     }
 
     if let Err(err) = execute!(stdout(), DisableBracketedPaste) {
+        first_error.get_or_insert(err);
+    }
+    if let Err(err) = execute!(stdout(), DisableMouseCapture) {
         first_error.get_or_insert(err);
     }
     let _ = execute!(stdout(), DisableFocusChange);
@@ -545,6 +646,8 @@ fn set_panic_hook() {
 pub enum TuiEvent {
     /// A terminal key event after focus, paste, and protocol bookkeeping has been handled.
     Key(KeyEvent),
+    /// A mouse event selected by the event stream for application-level hit testing.
+    Mouse(MouseEvent),
     /// A bracketed paste payload normalized by the app layer before it reaches the composer.
     Paste(String),
     /// A terminal size notification that should be handled as resize-sensitive draw work.

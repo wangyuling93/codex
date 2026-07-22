@@ -36,6 +36,8 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
@@ -289,6 +291,25 @@ impl PagerView {
         tui.frame_requester()
             .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
         Ok(())
+    }
+
+    fn handle_mouse_event(&mut self, mouse_event: MouseEvent, viewport_area: Rect) -> bool {
+        let content_area = self.content_area(viewport_area);
+        let max_scroll = self
+            .content_height(content_area.width)
+            .saturating_sub(content_area.height as usize);
+        let scroll_offset = self.scroll_offset.min(max_scroll);
+        self.scroll_offset = match mouse_event.kind {
+            MouseEventKind::ScrollUp => scroll_offset.saturating_sub(1),
+            MouseEventKind::ScrollDown => scroll_offset.saturating_add(1).min(max_scroll),
+            MouseEventKind::Down(_)
+            | MouseEventKind::Up(_)
+            | MouseEventKind::Drag(_)
+            | MouseEventKind::Moved
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => return false,
+        };
+        true
     }
 
     /// Returns the height of one page in content rows.
@@ -800,6 +821,15 @@ impl TranscriptOverlay {
                 }
                 other => self.view.handle_key_event(tui, other),
             },
+            TuiEvent::Mouse(mouse_event) => {
+                let mut view_area = tui.terminal.viewport_area;
+                view_area.height = view_area.height.saturating_sub(3);
+                if self.view.handle_mouse_event(mouse_event, view_area) {
+                    tui.frame_requester()
+                        .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
+                }
+                Ok(())
+            }
             TuiEvent::Draw | TuiEvent::Resize => {
                 tui.draw(u16::MAX, |frame| {
                     self.render(frame.area(), frame.buffer);
@@ -898,6 +928,15 @@ impl StaticOverlay {
                 }
                 other => self.view.handle_key_event(tui, other),
             },
+            TuiEvent::Mouse(mouse_event) => {
+                let mut view_area = tui.terminal.viewport_area;
+                view_area.height = view_area.height.saturating_sub(3);
+                if self.view.handle_mouse_event(mouse_event, view_area) {
+                    tui.frame_requester()
+                        .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
+                }
+                Ok(())
+            }
             TuiEvent::Draw | TuiEvent::Resize => {
                 tui.draw(u16::MAX, |frame| {
                     self.render(frame.area(), frame.buffer);
@@ -959,6 +998,7 @@ mod tests {
     use crate::history_cell::HistoryCell;
     use crate::history_cell::new_patch_event;
     use codex_protocol::parse_command::ParsedCommand;
+    use crossterm::event::KeyModifiers;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::text::Text;
@@ -1528,6 +1568,32 @@ mod tests {
         );
 
         assert_eq!(pv.content_height(/*width*/ 80), 5);
+    }
+
+    #[test]
+    fn pager_view_mouse_wheel_scrolls_by_one_row() {
+        let mut view = pager_view(vec![paragraph_block("line", /*lines*/ 20)], "T", usize::MAX);
+        let area = Rect::new(
+            /*x*/ 0, /*y*/ 0, /*width*/ 20, /*height*/ 8,
+        );
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let bottom_offset = view.scroll_offset;
+        let mouse_event = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(view.handle_mouse_event(mouse_event(MouseEventKind::ScrollUp), area));
+        let scrolled_up_offset = view.scroll_offset;
+        assert!(view.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown), area));
+
+        assert_eq!(
+            (scrolled_up_offset, view.scroll_offset),
+            (bottom_offset.saturating_sub(1), bottom_offset)
+        );
     }
 
     #[test]

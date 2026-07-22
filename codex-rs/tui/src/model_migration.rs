@@ -12,6 +12,8 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::prelude::Stylize as _;
 use ratatui::prelude::Widget;
 use ratatui::text::Line;
@@ -152,6 +154,7 @@ pub(crate) async fn run_model_migration_prompt(
         if let Some(event) = events.next().await {
             match event {
                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
+                TuiEvent::Mouse(mouse_event) => screen.handle_mouse(mouse_event),
                 TuiEvent::Paste(_) => {}
                 TuiEvent::Draw | TuiEvent::Resize => {
                     let _ = alt.tui.draw(u16::MAX, |frame| {
@@ -237,6 +240,26 @@ impl ModelMigrationScreen {
             self.handle_menu_key(key_event.code);
         } else if matches!(key_event.code, KeyCode::Esc | KeyCode::Enter) {
             self.accept();
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse_event: MouseEvent) {
+        if !self.copy.can_opt_out {
+            return;
+        }
+        match mouse_event.kind {
+            MouseEventKind::ScrollUp => {
+                self.highlight_option(MigrationMenuOption::TryNewModel);
+            }
+            MouseEventKind::ScrollDown => {
+                self.highlight_option(MigrationMenuOption::UseExistingModel);
+            }
+            MouseEventKind::Down(_)
+            | MouseEventKind::Up(_)
+            | MouseEventKind::Drag(_)
+            | MouseEventKind::Moved
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {}
         }
     }
 
@@ -416,6 +439,9 @@ mod tests {
     use crate::tui::FrameRequester;
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+    use crossterm::event::MouseEvent;
+    use crossterm::event::MouseEventKind;
     use insta::assert_snapshot;
     use ratatui::layout::Rect;
 
@@ -593,6 +619,33 @@ mod tests {
             screen.outcome(),
             super::ModelMigrationOutcome::Rejected
         ));
+    }
+
+    #[test]
+    fn mouse_wheel_selects_migration_menu_option() {
+        let mut screen = ModelMigrationScreen::new(
+            FrameRequester::test_dummy(),
+            migration_copy_for_models(
+                "gpt-old",
+                "gpt-new",
+                /*model_link*/ None,
+                /*migration_copy*/ None,
+                /*migration_markdown*/ None,
+                "gpt-new".to_string(),
+                /*target_description*/ None,
+                /*can_opt_out*/ true,
+            ),
+        );
+
+        screen.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        screen.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(screen.outcome(), super::ModelMigrationOutcome::Rejected);
     }
 
     #[test]

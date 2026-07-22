@@ -47,6 +47,7 @@ use codex_protocol::user_input::TextElement;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -688,6 +689,13 @@ impl BottomPane {
                 self.request_redraw_in(ChatComposer::recommended_paste_flush_delay());
             }
             input_result
+        }
+    }
+
+    /// Forward mouse input to the composer when no modal bottom-pane view is active.
+    pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        if self.view_stack.is_empty() && self.composer.handle_mouse_event(mouse_event) {
+            self.request_redraw();
         }
     }
 

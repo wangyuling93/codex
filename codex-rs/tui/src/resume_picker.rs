@@ -47,6 +47,8 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
@@ -475,6 +477,7 @@ async fn run_session_picker_with_loader(
                             return Ok(sel);
                         }
                     }
+                    TuiEvent::Mouse(mouse_event) => state.handle_mouse_event(mouse_event),
                     TuiEvent::Paste(pasted) => {
                         state.handle_paste(pasted);
                     }
@@ -1162,19 +1165,10 @@ impl PickerState {
                 }
             }
             _ if allow_plain_char_navigation && self.list_keymap.move_up.is_pressed(key) => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                    self.ensure_selected_visible();
-                }
-                self.request_frame();
+                self.move_selection_up();
             }
             _ if allow_plain_char_navigation && self.list_keymap.move_down.is_pressed(key) => {
-                if self.selected + 1 < self.filtered_rows.len() {
-                    self.selected += 1;
-                    self.ensure_selected_visible();
-                }
-                self.maybe_load_more_for_scroll();
-                self.request_frame();
+                self.move_selection_down();
             }
             _ if allow_plain_char_navigation && self.list_keymap.page_up.is_pressed(key) => {
                 let step = self.view_rows.unwrap_or(10).max(1);
@@ -1256,6 +1250,47 @@ impl PickerState {
             _ => {}
         }
         Ok(None)
+    }
+
+    fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        if self.is_transcript_loading() {
+            return;
+        }
+        match mouse_event.kind {
+            MouseEventKind::ScrollUp => {
+                self.inline_error = None;
+                self.pending_page_down_target = None;
+                self.move_selection_up();
+            }
+            MouseEventKind::ScrollDown => {
+                self.inline_error = None;
+                self.pending_page_down_target = None;
+                self.move_selection_down();
+            }
+            MouseEventKind::Down(_)
+            | MouseEventKind::Up(_)
+            | MouseEventKind::Drag(_)
+            | MouseEventKind::Moved
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {}
+        }
+    }
+
+    fn move_selection_up(&mut self) {
+        if self.selected > 0 {
+            self.selected -= 1;
+            self.ensure_selected_visible();
+        }
+        self.request_frame();
+    }
+
+    fn move_selection_down(&mut self) {
+        if self.selected + 1 < self.filtered_rows.len() {
+            self.selected += 1;
+            self.ensure_selected_visible();
+        }
+        self.maybe_load_more_for_scroll();
+        self.request_frame();
     }
 
     fn handle_paste(&mut self, pasted: String) {
@@ -3237,6 +3272,7 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
+    use crossterm::event::MouseButton;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use std::path::Path;
@@ -3311,6 +3347,46 @@ mod tests {
             .map(str::trim_end)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn non_scroll_mouse_events_preserve_pending_picker_state() {
+        let loader = page_only_loader(|_| {});
+        let mouse_kinds = [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollLeft,
+            MouseEventKind::ScrollRight,
+        ];
+        let mut actual = Vec::new();
+
+        for kind in mouse_kinds {
+            let mut state = PickerState::new(
+                FrameRequester::test_dummy(),
+                loader.clone(),
+                ProviderFilter::MatchDefault(String::from("openai")),
+                /*show_all*/ true,
+                /*filter_cwd*/ None,
+                SessionPickerAction::Resume,
+            );
+            state.inline_error = Some(String::from("preview unavailable"));
+            state.pending_page_down_target = Some(7);
+
+            state.handle_mouse_event(MouseEvent {
+                kind,
+                column: 3,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            });
+            actual.push((state.inline_error.clone(), state.pending_page_down_target));
+        }
+
+        assert_eq!(
+            actual,
+            vec![(Some(String::from("preview unavailable")), Some(7)); 6]
+        );
     }
 
     #[test]
@@ -6030,6 +6106,42 @@ session_picker_view = "dense"
 
         assert_eq!(state.selected, 2);
         assert_eq!(state.scroll_top, 2);
+    }
+
+    #[test]
+    fn mouse_wheel_moves_picker_selection_independent_of_list_keymap() {
+        let loader = page_only_loader(|_| {});
+        let mut state = PickerState::new(
+            FrameRequester::test_dummy(),
+            loader,
+            ProviderFilter::MatchDefault(String::from("openai")),
+            /*show_all*/ true,
+            /*filter_cwd*/ None,
+            SessionPickerAction::Resume,
+        );
+        state.filtered_rows = (0..3)
+            .map(|idx| {
+                make_row(
+                    &format!("/tmp/{idx}.jsonl"),
+                    "2026-05-02T12:00:00Z",
+                    &format!("row {idx}"),
+                )
+            })
+            .collect();
+        state.list_keymap.move_up.clear();
+        state.list_keymap.move_down.clear();
+        let mouse_event = |kind| MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        state.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown));
+        let after_scroll_down = state.selected;
+        state.handle_mouse_event(mouse_event(MouseEventKind::ScrollUp));
+
+        assert_eq!((after_scroll_down, state.selected), (1, 0));
     }
 
     #[tokio::test]

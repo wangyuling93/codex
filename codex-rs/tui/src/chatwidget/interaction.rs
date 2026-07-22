@@ -3,6 +3,10 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        self.bottom_pane.handle_mouse_event(mouse_event);
+    }
+
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
         if self.bottom_pane.has_active_view()
             && !matches!(

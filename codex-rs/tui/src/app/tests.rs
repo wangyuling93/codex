@@ -117,6 +117,9 @@ use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::user_input::TextElement;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
 use ratatui::buffer::Buffer;
@@ -4996,6 +4999,72 @@ fn rendered_line_text(line: &crate::terminal_hyperlinks::HyperlinkLine) -> Strin
         .iter()
         .map(|span| span.content.as_ref())
         .collect()
+}
+
+#[tokio::test]
+async fn main_view_mouse_scroll_opens_transcript_only_without_a_popup() -> Result<()> {
+    let mut app = make_test_app().await;
+    app.transcript_cells = (0..20)
+        .map(|index| plain_line_cell(format!("cell {index}")))
+        .collect();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut app_server = start_config_write_test_app_server(&app).await?;
+    let scroll_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+    let scroll_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        ..scroll_down
+    };
+
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Mouse(scroll_down))
+        .await?;
+    assert!(app.overlay.is_none());
+
+    app.chat_widget.insert_str("/");
+    assert!(!app.chat_widget.no_modal_or_popup_active());
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Mouse(scroll_up))
+        .await?;
+    assert!(app.overlay.is_none());
+
+    app.chat_widget.apply_external_edit(String::new());
+    assert!(app.chat_widget.no_modal_or_popup_active());
+
+    app.chat_widget.apply_external_edit(String::from("hello"));
+    let rendered_area = app.render_chat_widget_frame(&mut tui)?;
+    let (cursor_x, cursor_y) = app
+        .chat_widget
+        .as_renderable()
+        .cursor_pos(rendered_area)
+        .expect("composer cursor after render");
+    app.handle_tui_event(
+        &mut tui,
+        &mut app_server,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: cursor_x.saturating_sub("hello".len() as u16),
+            row: cursor_y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await?;
+    app.chat_widget.insert_str("X");
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "Xhello");
+
+    app.chat_widget.apply_external_edit(String::new());
+    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Mouse(scroll_up))
+        .await?;
+
+    assert!(app.overlay.is_some());
+    assert!(tui.is_alt_screen_active());
+    let Some(Overlay::Transcript(overlay)) = app.overlay.as_ref() else {
+        panic!("expected transcript overlay");
+    };
+    assert!(!overlay.is_scrolled_to_bottom());
+    Ok(())
 }
 
 #[tokio::test]

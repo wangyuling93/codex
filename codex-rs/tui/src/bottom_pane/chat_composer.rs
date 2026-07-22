@@ -266,6 +266,7 @@ mod completion_target;
 mod draft_state;
 mod footer_state;
 mod history_search;
+mod mouse;
 mod popup_state;
 mod slash_input;
 
@@ -290,6 +291,7 @@ use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
 use crate::history_cell;
 use crate::skills_helpers::skill_display_name;
+use crate::style::accent_style;
 use crate::tui::FrameRequester;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 #[cfg(test)]
@@ -300,6 +302,7 @@ use codex_file_search::FileMatch;
 #[cfg(test)]
 use codex_plugin::AppConnectorId;
 use codex_plugin::PluginCapabilitySummary;
+use std::cell::Cell;
 use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -310,6 +313,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use ratatui::style::Color;
+
+#[cfg(test)]
+#[path = "chat_composer/mouse_tests.rs"]
+mod mouse_tests;
 
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
@@ -497,6 +504,8 @@ pub(crate) struct ChatComposer {
     history_search_next_keys: Vec<KeyBinding>,
     editor_keymap: EditorKeymap,
     vim_normal_keymap: VimNormalKeymap,
+    last_textarea_area: Cell<Option<Rect>>,
+    mouse_drag_active: bool,
 }
 
 /// A resolved legacy `$` target plus any catalog built while disambiguating shell syntax.
@@ -677,6 +686,8 @@ impl ChatComposer {
             history_search_next_keys: default_keymap.composer.history_search_next.clone(),
             editor_keymap: default_editor_keymap,
             vim_normal_keymap: default_vim_normal_keymap,
+            last_textarea_area: Cell::new(None),
+            mouse_drag_active: false,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -1083,6 +1094,7 @@ impl ChatComposer {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let pasted = sanitize_user_text(&pasted);
         let char_count = pasted.chars().count();
+        let elements_before = self.element_payloads_before_edit();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = self.next_large_paste_placeholder(char_count);
             self.draft.textarea.insert_element(&placeholder);
@@ -1094,6 +1106,9 @@ impl ChatComposer {
             self.draft.textarea.insert_str(" ");
         } else {
             self.insert_str(&pasted);
+        }
+        if let Some(elements_before) = elements_before {
+            self.reconcile_deleted_elements(elements_before);
         }
         self.draft.paste_burst.clear_after_explicit_paste();
         self.sync_popups();
@@ -1702,8 +1717,12 @@ impl ChatComposer {
 
     /// Insert an attachment placeholder and track it for the next submission.
     pub fn attach_image(&mut self, path: PathBuf) {
+        let elements_before = self.element_payloads_before_edit();
         self.attachments
             .attach_image(&mut self.draft.textarea, path);
+        if let Some(elements_before) = elements_before {
+            self.reconcile_deleted_elements(elements_before);
+        }
     }
 
     #[cfg(test)]
@@ -1829,7 +1848,11 @@ impl ChatComposer {
     }
 
     pub(crate) fn insert_str(&mut self, text: &str) {
+        let elements_before = self.element_payloads_before_edit();
         self.draft.textarea.insert_str(text);
+        if let Some(elements_before) = elements_before {
+            self.reconcile_deleted_elements(elements_before);
+        }
         self.sync_bash_mode_from_text();
         self.sync_popups();
     }
@@ -1903,11 +1926,11 @@ impl ChatComposer {
         if self.draft.disable_paste_burst {
             // When burst detection is disabled, treat IME/non-ASCII input as normal typing.
             // In particular, do not retro-capture or buffer already-inserted prefix text.
+            let elements_before = self.element_payloads_before_edit();
             self.draft.textarea.input(input);
-            let text_after = self.draft.textarea.text();
-            self.draft
-                .pending_pastes
-                .retain(|(placeholder, _)| text_after.contains(placeholder));
+            if let Some(elements_before) = elements_before {
+                self.reconcile_deleted_elements(elements_before);
+            }
             return (InputResult::None, true);
         }
         if let KeyEvent {
@@ -1964,12 +1987,11 @@ impl ChatComposer {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
             self.handle_paste(pasted);
         }
+        let elements_before = self.element_payloads_before_edit();
         self.draft.textarea.input(input);
-
-        let text_after = self.draft.textarea.text();
-        self.draft
-            .pending_pastes
-            .retain(|(placeholder, _)| text_after.contains(placeholder));
+        if let Some(elements_before) = elements_before {
+            self.reconcile_deleted_elements(elements_before);
+        }
         (InputResult::None, true)
     }
 
@@ -3540,16 +3562,12 @@ impl ChatComposer {
         // For non-char inputs (or after flushing), handle normally.
         // Track element removals so we can drop any corresponding placeholders without scanning
         // the full text. (Placeholders are atomic elements; when deleted, the element disappears.)
-        let elements_before = if self.draft.pending_pastes.is_empty() && self.attachments.is_empty()
-        {
-            None
-        } else {
-            Some(self.draft.textarea.element_payloads())
-        };
+        let elements_before = self.element_payloads_before_edit();
 
         if self.draft.is_bash_mode
             && matches!(input.code, KeyCode::Backspace)
             && self.draft.textarea.cursor() == 0
+            && self.draft.textarea.selection_range().is_none()
         {
             self.draft.is_bash_mode = false;
             return (InputResult::None, true);
@@ -3589,6 +3607,14 @@ impl ChatComposer {
         if !self.draft.is_bash_mode && self.draft.textarea.text().starts_with('!') {
             self.draft.textarea.replace_range(0..1, "");
             self.draft.is_bash_mode = true;
+        }
+    }
+
+    fn element_payloads_before_edit(&self) -> Option<Vec<String>> {
+        if self.draft.pending_pastes.is_empty() && self.attachments.is_empty() {
+            None
+        } else {
+            Some(self.draft.textarea.element_payloads())
         }
     }
 
@@ -4413,6 +4439,7 @@ impl ChatComposer {
     ) {
         let [composer_rect, remote_images_rect, textarea_rect, popup_rect] =
             self.layout_areas_with_textarea_right_reserve(area, textarea_right_reserve);
+        self.last_textarea_area.set(Some(textarea_rect));
         match &self.popups.active {
             ActivePopup::Command(popup) => {
                 popup.render_ref(popup_rect, buf);
@@ -4731,6 +4758,9 @@ impl ChatComposer {
                         .into_iter()
                         .map(|range| (range, search_highlight_style)),
                 );
+                if let Some(range) = self.draft.textarea.selection_range() {
+                    highlights.push((range, accent_style().reversed().underlined()));
+                }
                 if highlights.is_empty() {
                     StatefulWidgetRef::render_ref(
                         &(&self.draft.textarea),

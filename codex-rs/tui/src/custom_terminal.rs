@@ -675,14 +675,6 @@ where
         last_pos = Some(Position { x, y });
         match command {
             DrawCommand::Put { cell, .. } => {
-                if cell.modifier != modifier {
-                    let diff = ModifierDiff {
-                        from: modifier,
-                        to: cell.modifier,
-                    };
-                    diff.queue(writer)?;
-                    modifier = cell.modifier;
-                }
                 if cell.fg != fg || cell.bg != bg {
                     queue!(
                         writer,
@@ -690,6 +682,14 @@ where
                     )?;
                     fg = cell.fg;
                     bg = cell.bg;
+                }
+                if cell.modifier != modifier {
+                    let diff = ModifierDiff {
+                        from: modifier,
+                        to: cell.modifier,
+                    };
+                    diff.queue(writer)?;
+                    modifier = cell.modifier;
                 }
 
                 queue!(writer, Print(cell.symbol()))?;
@@ -788,6 +788,7 @@ mod tests {
     use ratatui::backend::WindowSize;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
+    use ratatui::style::Stylize;
 
     struct CaptureBackend {
         output: Vec<u8>,
@@ -932,6 +933,53 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
             "expected clear-to-end to start after the remaining wide char; commands: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn draw_applies_colors_before_text_modifiers() {
+        let mut first = Cell::default();
+        first.set_symbol("a").set_style(Style::default().cyan());
+        let mut selected = Cell::default();
+        selected.set_symbol("b").set_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD | Modifier::UNDERLINED),
+        );
+        let commands = [
+            DrawCommand::Put {
+                x: 0,
+                y: 0,
+                cell: first,
+            },
+            DrawCommand::Put {
+                x: 1,
+                y: 0,
+                cell: selected,
+            },
+        ];
+        let mut actual = Vec::new();
+
+        draw(&mut actual, commands.into_iter()).expect("draw commands");
+
+        let mut expected_prefix = Vec::new();
+        queue!(
+            expected_prefix,
+            SetColors(Colors::new(
+                crossterm::style::Color::Reset,
+                crossterm::style::Color::Reset,
+            )),
+            SetAttribute(crossterm::style::Attribute::Reverse),
+            SetAttribute(crossterm::style::Attribute::Bold),
+            SetAttribute(crossterm::style::Attribute::Underlined),
+            Print("b"),
+        )
+        .expect("queue expected output");
+        assert!(
+            actual
+                .windows(expected_prefix.len())
+                .any(|window| window == expected_prefix),
+            "expected color reset before selection modifiers; output: {:?}",
+            String::from_utf8_lossy(&actual),
         );
     }
 

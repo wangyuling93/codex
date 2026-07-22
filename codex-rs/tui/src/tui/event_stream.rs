@@ -26,6 +26,8 @@ use std::task::Context;
 use std::task::Poll;
 
 use crossterm::event::Event;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEventKind;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 use tokio_stream::Stream;
@@ -34,6 +36,8 @@ use tokio_stream::wrappers::WatchStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::TuiEvent;
+
+const MAX_SKIPPED_EVENTS_PER_POLL: usize = 32;
 
 /// Result type produced by an event source.
 pub type EventResult = std::io::Result<Event>;
@@ -186,13 +190,13 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
 
     /// Poll the shared crossterm stream for the next mapped `TuiEvent`.
     ///
-    /// This skips events we don't use (mouse events, etc.) and keeps polling until it yields
+    /// This skips events we don't use and keeps polling until it yields
     /// a mapped event, hits `Pending`, or sees EOF/error. When the broker is paused, it drops
     /// the underlying stream and returns `Pending` to fully release stdin.
     pub fn poll_crossterm_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<TuiEvent>> {
-        // Some crossterm events map to None (e.g. FocusLost, mouse); loop so we keep polling
-        // until we return a mapped event, hit Pending, or see EOF/error.
-        loop {
+        // Some crossterm events map to None (e.g. FocusLost or mouse motion); keep polling until we
+        // return a mapped event, hit Pending, or see EOF/error.
+        for _ in 0..MAX_SKIPPED_EVENTS_PER_POLL {
             let poll_result = {
                 let mut state = self
                     .broker
@@ -233,6 +237,8 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 return Poll::Ready(Some(mapped));
             }
         }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
     /// Poll the draw broadcast stream for the next draw event. Draw events are used to trigger a redraw of the TUI.
@@ -247,7 +253,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
         }
     }
 
-    /// Map a crossterm event to a [`TuiEvent`], skipping events we don't use (mouse events, etc.).
+    /// Map a crossterm event to a [`TuiEvent`], skipping events we don't use.
     fn map_crossterm_event(&mut self, event: Event) -> Option<TuiEvent> {
         match event {
             Event::Key(key_event) => {
@@ -269,6 +275,18 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             }
             Event::Resize(_, _) => Some(TuiEvent::Resize),
             Event::Paste(pasted) => Some(TuiEvent::Paste(pasted)),
+            Event::Mouse(mouse_event)
+                if matches!(
+                    mouse_event.kind,
+                    MouseEventKind::Down(MouseButton::Left)
+                        | MouseEventKind::Drag(MouseButton::Left)
+                        | MouseEventKind::Up(MouseButton::Left)
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollUp
+                ) =>
+            {
+                Some(TuiEvent::Mouse(mouse_event))
+            }
             Event::FocusGained => {
                 self.terminal_focused.store(true, Ordering::Relaxed);
                 crate::terminal_palette::requery_default_colors();
@@ -278,7 +296,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
                 self.terminal_focused.store(false, Ordering::Relaxed);
                 None
             }
-            _ => None,
+            Event::Mouse(_) => None,
         }
     }
 }
@@ -320,6 +338,7 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
+    use crossterm::event::MouseEvent;
     use pretty_assertions::assert_eq;
     use std::task::Context;
     use std::task::Poll;
@@ -429,6 +448,132 @@ mod tests {
             }
             other => panic!("expected key event, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn left_mouse_button_events_are_forwarded() {
+        let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused);
+        let expected = vec![
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 6,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            },
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 12,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            },
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 12,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            },
+        ];
+        for mouse_event in &expected {
+            handle.send(Ok(Event::Mouse(*mouse_event)));
+        }
+
+        let mut actual = Vec::new();
+        for _ in &expected {
+            match stream.next().await {
+                Some(TuiEvent::Mouse(mouse_event)) => actual.push(mouse_event),
+                other => panic!("expected mouse event, got {other:?}"),
+            }
+        }
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn vertical_wheel_events_are_forwarded() {
+        let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused);
+        let expected = vec![
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 6,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            },
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 6,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            },
+        ];
+        for mouse_event in &expected {
+            handle.send(Ok(Event::Mouse(*mouse_event)));
+        }
+
+        let mut actual = Vec::new();
+        for _ in &expected {
+            match stream.next().await {
+                Some(TuiEvent::Mouse(mouse_event)) => actual.push(mouse_event),
+                other => panic!("expected mouse event, got {other:?}"),
+            }
+        }
+
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn other_mouse_events_are_skipped() {
+        let (broker, handle, _draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused);
+        handle.send(Ok(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        })));
+        handle.send(Ok(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 8,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        })));
+        let expected_key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        handle.send(Ok(Event::Key(expected_key)));
+
+        assert!(matches!(
+            stream.next().await,
+            Some(TuiEvent::Key(key_event)) if key_event == expected_key
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ignored_mouse_motion_yields_to_draws() {
+        let (broker, handle, draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused);
+        stream.poll_draw_first = false;
+        for column in 0..=MAX_SKIPPED_EVENTS_PER_POLL {
+            handle.send(Ok(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: column as u16,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })));
+        }
+        let expected = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle.send(Ok(Event::Mouse(expected)));
+        draw_tx.send(()).expect("send draw");
+
+        assert!(matches!(stream.next().await, Some(TuiEvent::Draw)));
+        assert!(matches!(
+            stream.next().await,
+            Some(TuiEvent::Mouse(mouse_event)) if mouse_event == expected
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

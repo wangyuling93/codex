@@ -1,0 +1,11 @@
+---
+source: tui/src/bottom_pane/chat_composer/mouse_tests.rs
+expression: "format!(\"selection: {:?}\\nmodifiers: {selection_modifiers:?}\\ncursor: {:?}\\n{}\",\ncomposer.draft.textarea.selection_range(), composer.cursor_pos(area),\nterminal.backend(),)"
+---
+selection: Some(5..11)
+modifiers: [NONE, NONE, NONE, NONE, NONE, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED]
+cursor: Some((13, 1))
+"                              "
+"› hello world                 "
+"                              "
+"           100% context left  "

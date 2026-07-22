@@ -279,7 +279,7 @@ async fn update_full_transparency_restores_user_value_masked_by_effective_overri
     std::fs::write(&config_path, original)?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.config_layer_stack =
-        ConfigLayerStack::default().with_user_config(&config_path, toml::from_str(original)?);
+        ConfigLayerStack::default().with_user_config(&config_path, toml::from_str(original)?)?;
     app.transcript_cells
         .push(Arc::new(history_cell::new_info_event(
             "Existing transcript entry.".to_string(),

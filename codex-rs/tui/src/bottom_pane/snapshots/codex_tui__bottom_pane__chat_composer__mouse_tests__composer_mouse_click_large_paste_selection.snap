@@ -1,0 +1,11 @@
+---
+source: tui/src/bottom_pane/chat_composer/mouse_tests.rs
+expression: "format!(\"selection: {:?}\\nmodifiers: {selection_modifiers:?}\\ncursor: {:?}\\n{}\",\ncomposer.draft.textarea.selection_range(), composer.cursor_pos(area),\nterminal.backend(),)"
+---
+selection: Some(0..27)
+modifiers: [BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED]
+cursor: Some((2, 1))
+"                                                            "
+"› [Pasted Content 1012 chars]                               "
+"                                                            "
+"                                         100% context left  "

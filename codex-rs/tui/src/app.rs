@@ -172,6 +172,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::event::MouseEventKind;
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -1296,6 +1297,24 @@ See the Codex keymap documentation for supported actions and examples."
             match event {
                 TuiEvent::Key(key_event) => {
                     self.handle_key_event(tui, app_server, key_event).await;
+                }
+                TuiEvent::Mouse(mouse_event) => {
+                    if matches!(mouse_event.kind, MouseEventKind::ScrollUp)
+                        && self.chat_widget.no_modal_or_popup_active()
+                    {
+                        // Mouse tracking turns wheel gestures into input events, so the terminal
+                        // can no longer scroll its native buffer. Use the retained transcript as
+                        // the application's scroll surface instead.
+                        self.open_transcript_overlay(tui);
+                        let _ = self
+                            .handle_backtrack_overlay_event(tui, TuiEvent::Draw)
+                            .await?;
+                        let _ = self
+                            .handle_backtrack_overlay_event(tui, TuiEvent::Mouse(mouse_event))
+                            .await?;
+                    } else if !matches!(mouse_event.kind, MouseEventKind::ScrollDown) {
+                        self.chat_widget.handle_mouse_event(mouse_event);
+                    }
                 }
                 TuiEvent::Paste(pasted) => {
                     // Many terminals convert newlines to \r when pasting (e.g., iTerm2),

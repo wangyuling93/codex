@@ -37,6 +37,11 @@ use textwrap::Options;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+mod mouse;
+pub(crate) use self::mouse::MouseSelectionUpdate;
+#[cfg(test)]
+#[path = "textarea/mouse_tests.rs"]
+mod mouse_tests;
 mod vim;
 use self::vim::VimMode;
 use self::vim::VimMotion;
@@ -95,6 +100,15 @@ struct TextElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct TextSelection {
+    anchor: usize,
+    active: usize,
+    initial_hit: usize,
+    anchor_element: Option<Range<usize>>,
+    active_element: Option<Range<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TextElementSnapshot {
     pub(crate) id: u64,
     pub(crate) range: Range<usize>,
@@ -113,6 +127,7 @@ pub(crate) struct TextElementSnapshot {
 pub(crate) struct TextArea {
     text: String,
     cursor_pos: usize,
+    selection: Option<TextSelection>,
     wrap_cache: RefCell<Option<WrapCache>>,
     preferred_col: Option<usize>,
     elements: Vec<TextElement>,
@@ -154,6 +169,7 @@ impl TextArea {
         Self {
             text: String::new(),
             cursor_pos: 0,
+            selection: None,
             wrap_cache: RefCell::new(None),
             preferred_col: None,
             elements: Vec::new(),
@@ -206,6 +222,7 @@ impl TextArea {
         // Stage 1: replace the raw text and keep the cursor in a safe byte range.
         self.text = text.to_string();
         self.cursor_pos = self.cursor_pos.clamp(0, self.text.len());
+        self.selection = None;
         // Stage 2: rebuild element ranges from scratch against the new text.
         self.elements.clear();
         if let Some(elements) = elements {
@@ -353,10 +370,19 @@ impl TextArea {
     }
 
     pub fn insert_str(&mut self, text: &str) {
-        self.insert_str_at(self.cursor_pos, text);
+        if let Some(range) = self.selection_range() {
+            // The editable Vim cursor may be clamped before a selected newline. Move it into the
+            // selection so replacing that selection still leaves the cursor after the inserted
+            // text.
+            self.cursor_pos = range.start;
+            self.replace_range(range, text);
+        } else {
+            self.insert_str_at(self.cursor_pos, text);
+        }
     }
 
     pub fn insert_str_at(&mut self, pos: usize, text: &str) {
+        self.selection = None;
         let pos = self.clamp_pos_for_insertion(pos);
         self.text.insert_str(pos, text);
         self.wrap_cache.replace(None);
@@ -374,6 +400,7 @@ impl TextArea {
 
     fn replace_range_raw(&mut self, range: std::ops::Range<usize>, text: &str) {
         assert!(range.start <= range.end);
+        self.selection = None;
         let start = range.start.clamp(0, self.text.len());
         let end = range.end.clamp(0, self.text.len());
         let removed_len = end - start;
@@ -410,6 +437,7 @@ impl TextArea {
     }
 
     pub fn set_cursor(&mut self, pos: usize) {
+        self.selection = None;
         self.cursor_pos = pos.clamp(0, self.text.len());
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
         self.preferred_col = None;
@@ -430,7 +458,7 @@ impl TextArea {
         let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
         let i = Self::wrapped_line_index_by_start(&lines, self.cursor_pos)?;
         let ls = &lines[i];
-        let col = self.text[ls.start..self.cursor_pos].width() as u16;
+        let col = text_for_display(&self.text[ls.start..self.cursor_pos]).width() as u16;
         let screen_row = i
             .saturating_sub(effective_scroll as usize)
             .try_into()
@@ -444,7 +472,7 @@ impl TextArea {
 
     fn current_display_col(&self) -> usize {
         let bol = self.beginning_of_current_line();
-        self.text[bol..self.cursor_pos].width()
+        text_for_display(&self.text[bol..self.cursor_pos]).width()
     }
 
     fn wrapped_line_index_by_start(lines: &[Range<usize>], pos: usize) -> Option<usize> {
@@ -460,18 +488,25 @@ impl TextArea {
         line_end: usize,
         target_col: usize,
     ) {
+        self.cursor_pos = self.position_at_display_col_on_line(line_start, line_end, target_col);
+        self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
+    }
+
+    fn position_at_display_col_on_line(
+        &self,
+        line_start: usize,
+        line_end: usize,
+        target_col: usize,
+    ) -> usize {
         let mut width_so_far = 0usize;
-        for (i, g) in self.text[line_start..line_end].grapheme_indices(true) {
+        let display_line = text_for_display(&self.text[line_start..line_end]);
+        for (i, g) in display_line.grapheme_indices(true) {
             width_so_far += g.width();
             if width_so_far > target_col {
-                self.cursor_pos = line_start + i;
-                // Avoid landing inside an element; round to nearest boundary
-                self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
-                return;
+                return line_start + i;
             }
         }
-        self.cursor_pos = line_end;
-        self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
+        line_end
     }
 
     fn beginning_of_line(&self, pos: usize) -> usize {
@@ -978,7 +1013,7 @@ impl TextArea {
 
     // ####### Input Functions #######
     pub fn delete_backward(&mut self, n: usize) {
-        if n == 0 || self.cursor_pos == 0 {
+        if n == 0 || self.delete_selection() || self.cursor_pos == 0 {
             return;
         }
         let mut target = self.cursor_pos;
@@ -992,7 +1027,7 @@ impl TextArea {
     }
 
     pub fn delete_forward(&mut self, n: usize) {
-        if n == 0 || self.cursor_pos >= self.text.len() {
+        if n == 0 || self.delete_selection() || self.cursor_pos >= self.text.len() {
             return;
         }
         let mut target = self.cursor_pos;
@@ -1006,7 +1041,14 @@ impl TextArea {
     }
 
     pub fn delete_forward_kill(&mut self, n: usize) {
-        if n == 0 || self.cursor_pos >= self.text.len() {
+        if n == 0 {
+            return;
+        }
+        if let Some(range) = self.selection_range() {
+            self.kill_range(range);
+            return;
+        }
+        if self.cursor_pos >= self.text.len() {
             return;
         }
         let mut target = self.cursor_pos;
@@ -1020,6 +1062,10 @@ impl TextArea {
     }
 
     pub fn delete_backward_word(&mut self) {
+        if let Some(range) = self.selection_range() {
+            self.kill_range(range);
+            return;
+        }
         let start = self.beginning_of_previous_word();
         self.kill_range(start..self.cursor_pos);
     }
@@ -1030,6 +1076,10 @@ impl TextArea {
     /// by `end_of_next_word()`. Any whitespace (including newlines) between the cursor and that
     /// word is included in the deletion.
     pub fn delete_forward_word(&mut self) {
+        if let Some(range) = self.selection_range() {
+            self.kill_range(range);
+            return;
+        }
         let end = self.end_of_next_word();
         if end > self.cursor_pos {
             self.kill_range(self.cursor_pos..end);
@@ -1043,6 +1093,10 @@ impl TextArea {
     /// yank target and remains available even if a caller later clears or rewrites the visible
     /// buffer via `set_text_*`.
     pub fn kill_to_end_of_line(&mut self) {
+        if let Some(range) = self.selection_range() {
+            self.kill_range(range);
+            return;
+        }
         let eol = self.end_of_current_line();
         let range = if self.cursor_pos == eol {
             if eol < self.text.len() {
@@ -1067,6 +1121,10 @@ impl TextArea {
     }
 
     pub fn kill_to_beginning_of_line(&mut self) {
+        if let Some(range) = self.selection_range() {
+            self.kill_range(range);
+            return;
+        }
         let bol = self.beginning_of_current_line();
         let range = if self.cursor_pos == bol {
             if bol > 0 { Some(bol - 1..bol) } else { None }
@@ -1194,17 +1252,38 @@ impl TextArea {
 
     /// Move the cursor left by a single grapheme cluster.
     pub fn move_cursor_left(&mut self) {
+        if let Some(range) = self.selection_range() {
+            self.cursor_pos = range.start;
+            if self.is_vim_normal_mode() {
+                self.cursor_pos = self.cursor_pos.min(self.vim_line_end_cursor());
+            }
+            self.clear_selection();
+            self.preferred_col = None;
+            return;
+        }
+        self.clear_selection();
         self.cursor_pos = self.prev_atomic_boundary(self.cursor_pos);
         self.preferred_col = None;
     }
 
     /// Move the cursor right by a single grapheme cluster.
     pub fn move_cursor_right(&mut self) {
+        if let Some(range) = self.selection_range() {
+            self.cursor_pos = range.end;
+            if self.is_vim_normal_mode() {
+                self.cursor_pos = self.cursor_pos.min(self.vim_line_end_cursor());
+            }
+            self.clear_selection();
+            self.preferred_col = None;
+            return;
+        }
+        self.clear_selection();
         self.cursor_pos = self.next_atomic_boundary(self.cursor_pos);
         self.preferred_col = None;
     }
 
     pub fn move_cursor_up(&mut self) {
+        self.clear_selection();
         // If we have a wrapping cache, prefer navigating across wrapped (visual) lines.
         if let Some((target_col, maybe_line)) = {
             let cache_ref = self.wrap_cache.borrow();
@@ -1212,9 +1291,9 @@ impl TextArea {
                 let lines = &cache.lines;
                 if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor_pos) {
                     let cur_range = &lines[idx];
-                    let target_col = self
-                        .preferred_col
-                        .unwrap_or_else(|| self.text[cur_range.start..self.cursor_pos].width());
+                    let target_col = self.preferred_col.unwrap_or_else(|| {
+                        text_for_display(&self.text[cur_range.start..self.cursor_pos]).width()
+                    });
                     if idx > 0 {
                         let prev = &lines[idx - 1];
                         let line_start = prev.start;
@@ -1268,6 +1347,7 @@ impl TextArea {
     }
 
     pub fn move_cursor_down(&mut self) {
+        self.clear_selection();
         // If we have a wrapping cache, prefer navigating across wrapped (visual) lines.
         if let Some((target_col, move_to_last)) = {
             let cache_ref = self.wrap_cache.borrow();
@@ -1275,9 +1355,9 @@ impl TextArea {
                 let lines = &cache.lines;
                 if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor_pos) {
                     let cur_range = &lines[idx];
-                    let target_col = self
-                        .preferred_col
-                        .unwrap_or_else(|| self.text[cur_range.start..self.cursor_pos].width());
+                    let target_col = self.preferred_col.unwrap_or_else(|| {
+                        text_for_display(&self.text[cur_range.start..self.cursor_pos]).width()
+                    });
                     if idx + 1 < lines.len() {
                         let next = &lines[idx + 1];
                         let line_start = next.start;
@@ -1442,6 +1522,7 @@ impl TextArea {
         if start > end || end > self.text.len() {
             return false;
         }
+        self.clear_selection();
 
         let removed_len = end - start;
         let inserted_len = new.len();
@@ -1493,8 +1574,16 @@ impl TextArea {
     }
 
     pub fn insert_element(&mut self, text: &str) -> u64 {
-        let start = self.clamp_pos_for_insertion(self.cursor_pos);
-        self.insert_str_at(start, text);
+        let start = if let Some(range) = self.selection_range() {
+            let range = self.expand_range_to_element_boundaries(range);
+            let start = range.start;
+            self.replace_range_raw(range, text);
+            start
+        } else {
+            let start = self.clamp_pos_for_insertion(self.cursor_pos);
+            self.insert_str_at(start, text);
+            start
+        };
         let end = start + text.len();
         let id = self.add_element(start..end);
         // Place cursor at end of inserted element
@@ -1994,7 +2083,8 @@ impl TextArea {
                     continue;
                 }
                 let styled = &self.text[overlap_start..overlap_end];
-                let x_off = self.text[line_range.start..overlap_start].width() as u16;
+                let x_off =
+                    text_for_display(&self.text[line_range.start..overlap_start]).width() as u16;
                 let style = base_style.fg(Color::Cyan);
                 buf.set_string(area.x + x_off, y, text_for_display(styled), style);
             }
@@ -2004,12 +2094,26 @@ impl TextArea {
             for (highlight_range, style) in highlights {
                 let overlap_start = highlight_range.start.max(line_range.start);
                 let overlap_end = highlight_range.end.min(line_range.end);
-                if overlap_start >= overlap_end {
-                    continue;
+                if overlap_start < overlap_end {
+                    let highlighted = &self.text[overlap_start..overlap_end];
+                    let x_off = text_for_display(&self.text[line_range.start..overlap_start])
+                        .width() as u16;
+                    buf.set_string(area.x + x_off, y, text_for_display(highlighted), *style);
                 }
-                let highlighted = &self.text[overlap_start..overlap_end];
-                let x_off = self.text[line_range.start..overlap_start].width() as u16;
-                buf.set_string(area.x + x_off, y, text_for_display(highlighted), *style);
+
+                // A logical newline is excluded from `line_range`, but it still occupies a
+                // selectable boundary at the end of the visual line. Style the trailing cell so
+                // a selection containing only that newline remains visible.
+                if line_range.end < self.text.len()
+                    && self.text.as_bytes()[line_range.end] == b'\n'
+                    && highlight_range.contains(&line_range.end)
+                    && area.width > 0
+                {
+                    let line_width =
+                        text_for_display(&self.text[line_range.clone()]).width() as u16;
+                    let x_off = line_width.min(area.width.saturating_sub(1));
+                    buf.set_style(Rect::new(area.x + x_off, y, 1, 1), *style);
+                }
             }
         }
     }

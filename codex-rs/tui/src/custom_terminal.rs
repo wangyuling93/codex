@@ -167,6 +167,8 @@ where
     visible_history_rows: u16,
     /// Whether explicit cell backgrounds should be replaced with the terminal default.
     full_transparency: bool,
+    #[cfg(test)]
+    screen_size_override: Option<Size>,
 }
 
 impl<B> Drop for Terminal<B>
@@ -245,6 +247,8 @@ where
             last_known_cursor_pos: cursor_pos,
             visible_history_rows: 0,
             full_transparency: false,
+            #[cfg(test)]
+            screen_size_override: None,
         }
     }
 
@@ -254,7 +258,10 @@ where
         screen_size: Size,
         cursor_pos: Position,
     ) -> Self {
-        Self::with_screen_size_and_cursor_position(backend, screen_size, cursor_pos)
+        let mut terminal =
+            Self::with_screen_size_and_cursor_position(backend, screen_size, cursor_pos);
+        terminal.screen_size_override = Some(screen_size);
+        terminal
     }
 
     /// Get a Frame object which provides a consistent view into the terminal state for rendering.
@@ -567,6 +574,10 @@ where
 
     /// Queries the real size of the backend.
     pub fn size(&self) -> io::Result<Size> {
+        #[cfg(test)]
+        if let Some(size) = self.screen_size_override {
+            return Ok(size);
+        }
         self.backend.size()
     }
 }

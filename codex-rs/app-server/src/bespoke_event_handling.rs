@@ -2203,6 +2203,7 @@ mod tests {
             updated_at: created_at,
             recency_at: created_at,
             archived_at: None,
+            is_pinned: false,
             cwd: test_path_buf("/tmp").abs().into(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
@@ -2663,7 +2664,9 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager.start_thread(config.clone()).await?;
+        } = thread_manager
+            .start_thread(codex_core::StartThreadOptions::new(config.clone()))
+            .await?;
         let thread_state = new_thread_state();
         let thread_watch_manager = ThreadWatchManager::new();
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -3241,7 +3244,9 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager.start_thread(config.clone()).await?;
+        } = thread_manager
+            .start_thread(codex_core::StartThreadOptions::new(config.clone()))
+            .await?;
         let thread_state = new_thread_state();
         {
             let mut state = thread_state.lock().await;
@@ -3329,7 +3334,9 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager.start_thread(config).await?;
+        } = thread_manager
+            .start_thread(codex_core::StartThreadOptions::new(config))
+            .await?;
         let child_thread_id = ThreadId::new();
         let child_thread_id_string = child_thread_id.to_string();
         let thread_watch_manager = ThreadWatchManager::new();
@@ -3419,7 +3426,9 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager.start_thread(config).await?;
+        } = thread_manager
+            .start_thread(codex_core::StartThreadOptions::new(config))
+            .await?;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             tx,

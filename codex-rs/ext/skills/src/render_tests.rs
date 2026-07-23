@@ -181,7 +181,7 @@ fn catalog_budget_uses_capped_context_percentage_or_character_fallback() {
 }
 
 #[test]
-fn omission_marker_is_charged_to_catalog_budget() {
+fn omission_notice_follows_render_policy_and_is_charged_to_catalog_budget() {
     let catalog = SkillCatalog {
         entries: (0..20)
             .map(|index| {
@@ -194,6 +194,13 @@ fn omission_marker_is_charged_to_catalog_budget() {
             .collect(),
         warnings: Vec::new(),
     };
+    let core_fragment = available_skills_fragment(
+        &catalog,
+        /*include_skills_usage_instructions*/ false,
+        SkillCatalogRenderPolicy::CoreCompatible,
+        SkillMetadataBudget::Tokens(100),
+    )
+    .expect("core-compatible catalog should render");
     let fragment = available_skills_fragment(
         &catalog,
         /*include_skills_usage_instructions*/ false,
@@ -208,6 +215,7 @@ fn omission_marker_is_charged_to_catalog_budget() {
         .map(|line| approx_token_count(&format!("{line}\n")))
         .sum::<usize>();
 
+    assert!(!core_fragment.body().contains("additional skills omitted"));
     assert!(fragment.body().contains("additional skills omitted"));
     assert!(rendered_metadata_cost <= 100);
 }
@@ -245,6 +253,44 @@ fn character_fallback_counts_multibyte_metadata_by_characters() {
 }
 
 #[test]
+fn catalog_report_counts_partial_description_truncation() {
+    let catalog = SkillCatalog {
+        entries: vec![entry(
+            "partial",
+            "abcdefghij",
+            /*short_description*/ None,
+        )],
+        warnings: Vec::new(),
+    };
+    let expected_line = "- partial: abcd (file: /skills/partial/SKILL.md)";
+    let budget = SkillMetadataBudget::Characters(metadata_line_cost(
+        SkillMetadataBudget::Characters(usize::MAX),
+        expected_line,
+    ));
+
+    let render = render_available_skills(
+        &catalog,
+        SkillCatalogRenderPolicy::ExtensionCompatible,
+        budget,
+    )
+    .expect("catalog should render");
+    assert_eq!(
+        render.report,
+        SkillRenderReport {
+            total_count: 1,
+            included_count: 1,
+            omitted_count: 0,
+            truncated_description_chars: 6,
+            truncated_description_count: 1,
+        }
+    );
+    let fragment = render
+        .into_fragment(/*include_skills_usage_instructions*/ false)
+        .expect("partial description should render");
+    assert!(fragment.body().contains(expected_line));
+}
+
+#[test]
 fn catalog_emits_omission_marker_when_every_minimum_skill_line_exceeds_budget() {
     let oversized = entry(
         "oversized",
@@ -257,18 +303,75 @@ fn catalog_emits_omission_marker_when_every_minimum_skill_line_exceeds_budget() 
         warnings: Vec::new(),
     };
 
-    let fragment = available_skills_fragment(
+    let expected_report = SkillRenderReport {
+        total_count: 1,
+        included_count: 0,
+        omitted_count: 1,
+        truncated_description_chars: MAX_CATALOG_SKILL_DESCRIPTION_CHARS,
+        truncated_description_count: 1,
+    };
+    let core_render = render_available_skills(
         &catalog,
-        /*include_skills_usage_instructions*/ false,
+        SkillCatalogRenderPolicy::CoreCompatible,
+        SkillMetadataBudget::Tokens(100),
+    )
+    .expect("core-compatible report should render");
+    assert_eq!(core_render.report, expected_report);
+    assert_eq!(
+        core_render.into_fragment(/*include_skills_usage_instructions*/ false),
+        None
+    );
+    let render = render_available_skills(
+        &catalog,
         SkillCatalogRenderPolicy::ExtensionCompatible,
         SkillMetadataBudget::Tokens(100),
     )
-    .expect("omission marker should fit");
+    .expect("catalog should render");
+    assert_eq!(render.report, expected_report);
+    let fragment = render
+        .into_fragment(/*include_skills_usage_instructions*/ false)
+        .expect("omission marker should fit");
 
     assert!(!fragment.body().contains("- oversized:"));
     assert!(
         fragment
             .body()
             .contains("- 1 additional skill omitted from this bounded skills list.")
+    );
+}
+
+#[test]
+fn catalog_preserves_report_when_no_fragment_fits_budget() {
+    let oversized = entry(
+        "oversized",
+        &"x".repeat(MAX_CATALOG_SKILL_DESCRIPTION_CHARS),
+        /*short_description*/ None,
+    )
+    .with_display_path(format!("skill://{}", "x".repeat(512)));
+    let catalog = SkillCatalog {
+        entries: vec![oversized],
+        warnings: Vec::new(),
+    };
+
+    let render = render_available_skills(
+        &catalog,
+        SkillCatalogRenderPolicy::ExtensionCompatible,
+        SkillMetadataBudget::Tokens(1),
+    )
+    .expect("catalog should produce a report");
+    assert_eq!(
+        render.report,
+        SkillRenderReport {
+            total_count: 1,
+            included_count: 0,
+            omitted_count: 1,
+            truncated_description_chars: MAX_CATALOG_SKILL_DESCRIPTION_CHARS,
+            truncated_description_count: 1,
+        }
+    );
+    assert!(
+        render
+            .into_fragment(/*include_skills_usage_instructions*/ false)
+            .is_none()
     );
 }

@@ -28,6 +28,10 @@ pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
         mcp_oauth_callback_url: None,
         skill_mcp_dependency_install_enabled: true,
         approval_policy: Constrained::allow_any(AskForApproval::OnRequest),
+        permission_profile: PermissionProfile::default(),
+        config_layer_stack: codex_config::ConfigLayerStack::default(),
+        approvals_reviewer: codex_config::types::ApprovalsReviewer::default(),
+        environment_cwds: HashMap::new(),
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         apps_enabled: false,
@@ -436,15 +440,9 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
         .get(CODEX_APPS_MCP_SERVER_NAME)
         .expect("codex apps server should exist");
 
-    let sample = sample
-        .configured_config()
-        .expect("configured server should retain transport");
-    let docs = docs
-        .configured_config()
-        .expect("configured server should retain transport");
-    let codex_apps = codex_apps
-        .configured_config()
-        .expect("codex apps should use configured transport");
+    let sample = sample.config();
+    let docs = docs.config();
+    let codex_apps = codex_apps.config();
 
     match &sample.transport {
         McpServerTransportConfig::StreamableHttp { url, .. } => {

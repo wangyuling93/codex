@@ -34,7 +34,10 @@ impl ChatComposer {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.mouse_drag_active = false;
                 if !textarea_area.contains(raw_position) {
-                    return false;
+                    // Clicking outside the textarea dismisses any active selection highlight.
+                    let had_selection = self.draft.textarea.selection_range().is_some();
+                    self.draft.textarea.clear_selection();
+                    return had_selection;
                 }
                 raw_position
             }

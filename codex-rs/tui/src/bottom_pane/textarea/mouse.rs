@@ -1,9 +1,10 @@
+//! Terminal hit-testing for mouse cursor placement and drag selection.
+
 use ratatui::layout::Position;
 use ratatui::layout::Rect;
 
 use super::TextArea;
 use super::TextAreaState;
-use super::TextSelection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MouseSelectionUpdate {
@@ -13,60 +14,6 @@ pub(crate) enum MouseSelectionUpdate {
 }
 
 impl TextArea {
-    fn begin_selection(&mut self, initial_hit: usize, element: Option<std::ops::Range<usize>>) {
-        self.selection = Some(TextSelection {
-            anchor: initial_hit,
-            active: initial_hit,
-            initial_hit,
-            anchor_element: element.clone(),
-            active_element: element,
-        });
-    }
-
-    fn set_selection_endpoint(&mut self, active: usize, element: Option<std::ops::Range<usize>>) {
-        if let Some(selection) = self.selection.as_mut() {
-            selection.active = active;
-            selection.active_element = element;
-        }
-    }
-
-    pub(crate) fn finish_selection(&mut self) {
-        if self.selection_range().is_none() {
-            self.selection = None;
-        }
-    }
-
-    pub(crate) fn clear_selection(&mut self) {
-        self.selection = None;
-    }
-
-    pub(crate) fn selection_range(&self) -> Option<std::ops::Range<usize>> {
-        let selection = self.selection.as_ref()?;
-        let mut start = selection.anchor.min(selection.active);
-        let mut end = selection.anchor.max(selection.active);
-
-        for element in [
-            selection.anchor_element.as_ref(),
-            selection.active_element.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            start = start.min(element.start);
-            end = end.max(element.end);
-        }
-
-        (start < end).then_some(start..end)
-    }
-
-    pub(super) fn delete_selection(&mut self) -> bool {
-        let Some(range) = self.selection_range() else {
-            return false;
-        };
-        self.replace_range(range, "");
-        true
-    }
-
     /// Move the cursor to the editable position represented by a rendered terminal cell.
     ///
     /// Returns `true` when `position` addresses a visible wrapped line in `area`. The mapping uses
@@ -112,17 +59,7 @@ impl TextArea {
             MouseSelectionUpdate::Begin => self.begin_selection(selection_position, element),
             MouseSelectionUpdate::Drag => self.set_selection_endpoint(selection_position, element),
             MouseSelectionUpdate::Release => {
-                if let Some(selection) = self.selection.as_mut() {
-                    if selection_position == selection.initial_hit {
-                        selection.active = selection.anchor;
-                        selection
-                            .active_element
-                            .clone_from(&selection.anchor_element);
-                    } else {
-                        selection.active = selection_position;
-                        selection.active_element = element;
-                    }
-                }
+                self.set_selection_endpoint(selection_position, element);
                 self.finish_selection();
             }
         }

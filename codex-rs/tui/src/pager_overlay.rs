@@ -52,6 +52,22 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 
+/// Height of the key-hint footer rendered under pager content in transcript/static overlays.
+const OVERLAY_HINT_FOOTER_HEIGHT: u16 = 3;
+
+/// Split an overlay area into the pager view region and the hint footer.
+fn overlay_layout(area: Rect) -> (Rect /*view*/, Rect /*footer*/) {
+    let view_height = area.height.saturating_sub(OVERLAY_HINT_FOOTER_HEIGHT);
+    let view = Rect::new(area.x, area.y, area.width, view_height);
+    let footer = Rect::new(
+        area.x,
+        area.y.saturating_add(view_height),
+        area.width,
+        OVERLAY_HINT_FOOTER_HEIGHT.min(area.height),
+    );
+    (view, footer)
+}
+
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
@@ -293,23 +309,37 @@ impl PagerView {
         Ok(())
     }
 
-    fn handle_mouse_event(&mut self, mouse_event: MouseEvent, viewport_area: Rect) -> bool {
+    /// Scroll content by `rows` (negative = up, positive = down), clamped to the content.
+    ///
+    /// Returns `true` when the effective scroll position changed (so callers can schedule a
+    /// redraw). Bottom-pin (`scroll_offset == usize::MAX`) is treated as `max_scroll` for that
+    /// comparison, so normalizing the pin to a concrete offset is not a visual change.
+    fn scroll_by_rows(&mut self, rows: i32, viewport_area: Rect) -> bool {
+        if rows == 0 {
+            return false;
+        }
         let content_area = self.content_area(viewport_area);
         let max_scroll = self
             .content_height(content_area.width)
             .saturating_sub(content_area.height as usize);
-        let scroll_offset = self.scroll_offset.min(max_scroll);
-        self.scroll_offset = match mouse_event.kind {
-            MouseEventKind::ScrollUp => scroll_offset.saturating_sub(1),
-            MouseEventKind::ScrollDown => scroll_offset.saturating_add(1).min(max_scroll),
-            MouseEventKind::Down(_)
-            | MouseEventKind::Up(_)
-            | MouseEventKind::Drag(_)
-            | MouseEventKind::Moved
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => return false,
+        let previous_effective = self.scroll_offset.min(max_scroll);
+        let next = if rows < 0 {
+            previous_effective.saturating_sub(rows.unsigned_abs() as usize)
+        } else {
+            previous_effective
+                .saturating_add(rows as usize)
+                .min(max_scroll)
         };
-        true
+        self.scroll_offset = next;
+        next != previous_effective
+    }
+
+    fn handle_mouse_event(&mut self, mouse_event: MouseEvent, viewport_area: Rect) -> bool {
+        match mouse_event.kind {
+            MouseEventKind::ScrollUp => self.scroll_by_rows(-1, viewport_area),
+            MouseEventKind::ScrollDown => self.scroll_by_rows(1, viewport_area),
+            _ => false,
+        }
     }
 
     /// Returns the height of one page in content rows.
@@ -801,11 +831,9 @@ impl TranscriptOverlay {
     }
 
     pub(crate) fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        let top_h = area.height.saturating_sub(3);
-        let top = Rect::new(area.x, area.y, area.width, top_h);
-        let bottom = Rect::new(area.x, area.y + top_h, area.width, 3);
-        self.view.render(top, buf);
-        self.render_hints(bottom, buf);
+        let (view_area, footer_area) = overlay_layout(area);
+        self.view.render(view_area, buf);
+        self.render_hints(footer_area, buf);
     }
 }
 
@@ -822,8 +850,7 @@ impl TranscriptOverlay {
                 other => self.view.handle_key_event(tui, other),
             },
             TuiEvent::Mouse(mouse_event) => {
-                let mut view_area = tui.terminal.viewport_area;
-                view_area.height = view_area.height.saturating_sub(3);
+                let (view_area, _) = overlay_layout(tui.terminal.viewport_area);
                 if self.view.handle_mouse_event(mouse_event, view_area) {
                     tui.frame_requester()
                         .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
@@ -839,6 +866,13 @@ impl TranscriptOverlay {
             _ => Ok(()),
         }
     }
+
+    /// Scroll the transcript content up by one row using the same geometry as rendering.
+    pub(crate) fn scroll_up_one_row(&mut self, viewport_area: Rect) -> bool {
+        let (view_area, _) = overlay_layout(viewport_area);
+        self.view.scroll_by_rows(-1, view_area)
+    }
+
     pub(crate) fn is_done(&self) -> bool {
         self.is_done
     }
@@ -910,11 +944,9 @@ impl StaticOverlay {
     }
 
     pub(crate) fn render(&mut self, area: Rect, buf: &mut Buffer) {
-        let top_h = area.height.saturating_sub(3);
-        let top = Rect::new(area.x, area.y, area.width, top_h);
-        let bottom = Rect::new(area.x, area.y + top_h, area.width, 3);
-        self.view.render(top, buf);
-        self.render_hints(bottom, buf);
+        let (view_area, footer_area) = overlay_layout(area);
+        self.view.render(view_area, buf);
+        self.render_hints(footer_area, buf);
     }
 }
 
@@ -929,8 +961,7 @@ impl StaticOverlay {
                 other => self.view.handle_key_event(tui, other),
             },
             TuiEvent::Mouse(mouse_event) => {
-                let mut view_area = tui.terminal.viewport_area;
-                view_area.height = view_area.height.saturating_sub(3);
+                let (view_area, _) = overlay_layout(tui.terminal.viewport_area);
                 if self.view.handle_mouse_event(mouse_event, view_area) {
                     tui.frame_requester()
                         .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
@@ -1455,8 +1486,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         overlay.render(area, &mut buf);
 
-        let top_h = area.height.saturating_sub(3);
-        let top = Rect::new(area.x, area.y, area.width, top_h);
+        let (top, _) = overlay_layout(area);
         let content_area = overlay.view.content_area(top);
 
         let mut nums = Vec::new();

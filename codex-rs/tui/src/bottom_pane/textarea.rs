@@ -39,6 +39,9 @@ use unicode_width::UnicodeWidthStr;
 
 mod mouse;
 pub(crate) use self::mouse::MouseSelectionUpdate;
+mod selection;
+use self::selection::SelectionCollapse;
+use self::selection::TextSelection;
 #[cfg(test)]
 #[path = "textarea/mouse_tests.rs"]
 mod mouse_tests;
@@ -97,15 +100,6 @@ fn text_for_display(text: &str) -> Cow<'_, str> {
 struct TextElement {
     id: u64,
     range: Range<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TextSelection {
-    anchor: usize,
-    active: usize,
-    initial_hit: usize,
-    anchor_element: Option<Range<usize>>,
-    active_element: Option<Range<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +216,7 @@ impl TextArea {
         // Stage 1: replace the raw text and keep the cursor in a safe byte range.
         self.text = text.to_string();
         self.cursor_pos = self.cursor_pos.clamp(0, self.text.len());
-        self.selection = None;
+        self.clear_selection();
         // Stage 2: rebuild element ranges from scratch against the new text.
         self.elements.clear();
         if let Some(elements) = elements {
@@ -370,19 +364,13 @@ impl TextArea {
     }
 
     pub fn insert_str(&mut self, text: &str) {
-        if let Some(range) = self.selection_range() {
-            // The editable Vim cursor may be clamped before a selected newline. Move it into the
-            // selection so replacing that selection still leaves the cursor after the inserted
-            // text.
-            self.cursor_pos = range.start;
-            self.replace_range(range, text);
-        } else {
+        if self.replace_selection_with(text).is_none() {
             self.insert_str_at(self.cursor_pos, text);
         }
     }
 
     pub fn insert_str_at(&mut self, pos: usize, text: &str) {
-        self.selection = None;
+        self.clear_selection();
         let pos = self.clamp_pos_for_insertion(pos);
         self.text.insert_str(pos, text);
         self.wrap_cache.replace(None);
@@ -400,7 +388,7 @@ impl TextArea {
 
     fn replace_range_raw(&mut self, range: std::ops::Range<usize>, text: &str) {
         assert!(range.start <= range.end);
-        self.selection = None;
+        self.clear_selection();
         let start = range.start.clamp(0, self.text.len());
         let end = range.end.clamp(0, self.text.len());
         let removed_len = end - start;
@@ -437,7 +425,7 @@ impl TextArea {
     }
 
     pub fn set_cursor(&mut self, pos: usize) {
-        self.selection = None;
+        self.collapse_selection(SelectionCollapse::Discard);
         self.cursor_pos = pos.clamp(0, self.text.len());
         self.cursor_pos = self.clamp_pos_to_nearest_boundary(self.cursor_pos);
         self.preferred_col = None;
@@ -1041,11 +1029,7 @@ impl TextArea {
     }
 
     pub fn delete_forward_kill(&mut self, n: usize) {
-        if n == 0 {
-            return;
-        }
-        if let Some(range) = self.selection_range() {
-            self.kill_range(range);
+        if n == 0 || self.kill_selection() {
             return;
         }
         if self.cursor_pos >= self.text.len() {
@@ -1062,8 +1046,7 @@ impl TextArea {
     }
 
     pub fn delete_backward_word(&mut self) {
-        if let Some(range) = self.selection_range() {
-            self.kill_range(range);
+        if self.kill_selection() {
             return;
         }
         let start = self.beginning_of_previous_word();
@@ -1076,8 +1059,7 @@ impl TextArea {
     /// by `end_of_next_word()`. Any whitespace (including newlines) between the cursor and that
     /// word is included in the deletion.
     pub fn delete_forward_word(&mut self) {
-        if let Some(range) = self.selection_range() {
-            self.kill_range(range);
+        if self.kill_selection() {
             return;
         }
         let end = self.end_of_next_word();
@@ -1093,8 +1075,7 @@ impl TextArea {
     /// yank target and remains available even if a caller later clears or rewrites the visible
     /// buffer via `set_text_*`.
     pub fn kill_to_end_of_line(&mut self) {
-        if let Some(range) = self.selection_range() {
-            self.kill_range(range);
+        if self.kill_selection() {
             return;
         }
         let eol = self.end_of_current_line();
@@ -1121,8 +1102,7 @@ impl TextArea {
     }
 
     pub fn kill_to_beginning_of_line(&mut self) {
-        if let Some(range) = self.selection_range() {
-            self.kill_range(range);
+        if self.kill_selection() {
             return;
         }
         let bol = self.beginning_of_current_line();
@@ -1239,6 +1219,10 @@ impl TextArea {
     }
 
     fn kill_current_line(&mut self) {
+        // Match the rest of the kill family: an active selection is the kill target.
+        if self.kill_selection() {
+            return;
+        }
         let range = self.current_line_range_with_newline();
         self.kill_line_range(range);
     }
@@ -1252,38 +1236,24 @@ impl TextArea {
 
     /// Move the cursor left by a single grapheme cluster.
     pub fn move_cursor_left(&mut self) {
-        if let Some(range) = self.selection_range() {
-            self.cursor_pos = range.start;
-            if self.is_vim_normal_mode() {
-                self.cursor_pos = self.cursor_pos.min(self.vim_line_end_cursor());
-            }
-            self.clear_selection();
-            self.preferred_col = None;
+        if self.collapse_selection(SelectionCollapse::Start) {
             return;
         }
-        self.clear_selection();
         self.cursor_pos = self.prev_atomic_boundary(self.cursor_pos);
         self.preferred_col = None;
     }
 
     /// Move the cursor right by a single grapheme cluster.
     pub fn move_cursor_right(&mut self) {
-        if let Some(range) = self.selection_range() {
-            self.cursor_pos = range.end;
-            if self.is_vim_normal_mode() {
-                self.cursor_pos = self.cursor_pos.min(self.vim_line_end_cursor());
-            }
-            self.clear_selection();
-            self.preferred_col = None;
+        if self.collapse_selection(SelectionCollapse::End) {
             return;
         }
-        self.clear_selection();
         self.cursor_pos = self.next_atomic_boundary(self.cursor_pos);
         self.preferred_col = None;
     }
 
     pub fn move_cursor_up(&mut self) {
-        self.clear_selection();
+        self.collapse_selection(SelectionCollapse::Discard);
         // If we have a wrapping cache, prefer navigating across wrapped (visual) lines.
         if let Some((target_col, maybe_line)) = {
             let cache_ref = self.wrap_cache.borrow();
@@ -1347,7 +1317,7 @@ impl TextArea {
     }
 
     pub fn move_cursor_down(&mut self) {
-        self.clear_selection();
+        self.collapse_selection(SelectionCollapse::Discard);
         // If we have a wrapping cache, prefer navigating across wrapped (visual) lines.
         if let Some((target_col, move_to_last)) = {
             let cache_ref = self.wrap_cache.borrow();
@@ -1574,10 +1544,7 @@ impl TextArea {
     }
 
     pub fn insert_element(&mut self, text: &str) -> u64 {
-        let start = if let Some(range) = self.selection_range() {
-            let range = self.expand_range_to_element_boundaries(range);
-            let start = range.start;
-            self.replace_range_raw(range, text);
+        let start = if let Some(start) = self.replace_selection_with(text) {
             start
         } else {
             let start = self.clamp_pos_for_insertion(self.cursor_pos);

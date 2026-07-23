@@ -1267,12 +1267,7 @@ impl PickerState {
                 self.pending_page_down_target = None;
                 self.move_selection_down();
             }
-            MouseEventKind::Down(_)
-            | MouseEventKind::Up(_)
-            | MouseEventKind::Drag(_)
-            | MouseEventKind::Moved
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => {}
+            _ => {}
         }
     }
 

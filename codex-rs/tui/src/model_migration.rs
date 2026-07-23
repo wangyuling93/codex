@@ -254,12 +254,7 @@ impl ModelMigrationScreen {
             MouseEventKind::ScrollDown => {
                 self.highlight_option(MigrationMenuOption::UseExistingModel);
             }
-            MouseEventKind::Down(_)
-            | MouseEventKind::Up(_)
-            | MouseEventKind::Drag(_)
-            | MouseEventKind::Moved
-            | MouseEventKind::ScrollLeft
-            | MouseEventKind::ScrollRight => {}
+            _ => {}
         }
     }
 

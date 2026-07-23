@@ -274,7 +274,7 @@ fn mouse_selection_is_used_by_kill_commands_and_yank() {
     let area = Rect::new(
         /*x*/ 2, /*y*/ 3, /*width*/ 20, /*height*/ 1,
     );
-    let commands: [SelectionKillCommand; 5] = [
+    let commands: [SelectionKillCommand; 6] = [
         ("delete_forward_kill", delete_forward_kill_one),
         ("delete_backward_word", TextArea::delete_backward_word),
         ("delete_forward_word", TextArea::delete_forward_word),
@@ -283,6 +283,7 @@ fn mouse_selection_is_used_by_kill_commands_and_yank() {
             "kill_to_beginning_of_line",
             TextArea::kill_to_beginning_of_line,
         ),
+        ("kill_current_line", TextArea::kill_current_line),
     ];
     let mut actual = Vec::new();
 
@@ -325,6 +326,7 @@ fn mouse_selection_is_used_by_kill_commands_and_yank() {
             "delete_forward_word",
             "kill_to_end_of_line",
             "kill_to_beginning_of_line",
+            "kill_current_line",
         ]
         .map(|name| {
             (

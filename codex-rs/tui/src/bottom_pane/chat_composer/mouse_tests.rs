@@ -694,6 +694,36 @@ fn composer_ignores_clicks_before_render_and_outside_textarea() {
 }
 
 #[test]
+fn clicking_outside_textarea_clears_active_selection() {
+    let mut composer = test_composer();
+    composer.insert_str("hello world");
+    drag_select_range(&mut composer, /*anchor*/ 0, /*active*/ 5);
+    assert_eq!(composer.draft.textarea.selection_range(), Some(0..5));
+
+    let width = 30;
+    let height = composer.desired_height(width);
+    let area = Rect::new(/*x*/ 0, /*y*/ 0, width, height);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+    terminal
+        .draw(|frame| composer.render(frame.area(), frame.buffer_mut()))
+        .expect("render");
+    let [_, _, textarea_area, _] = composer.layout_areas(area);
+    // Exclusive right edge is outside `Rect::contains` but still a realistic pointer position.
+    let outside = left_click(textarea_area.right(), textarea_area.y);
+
+    let handled = composer.handle_mouse_event(outside);
+
+    assert_eq!(
+        (
+            handled,
+            composer.draft.textarea.selection_range(),
+            composer.cursor()
+        ),
+        (true, None, 5)
+    );
+}
+
+#[test]
 fn clicking_inside_image_placeholder_clamps_to_an_editable_edge() {
     let mut composer = test_composer();
     let placeholder = local_image_label_text(/*number*/ 1);

@@ -193,12 +193,76 @@ impl App {
 
     /// Open transcript overlay (enters alternate screen and shows full transcript).
     pub(crate) fn open_transcript_overlay(&mut self, tui: &mut tui::Tui) {
+        self.enter_transcript_overlay(tui);
+        tui.frame_requester().schedule_frame();
+    }
+
+    /// Enter the transcript overlay without scheduling a frame.
+    ///
+    /// Callers that immediately draw or scroll should use this and schedule once when ready.
+    fn enter_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         let _ = tui.enter_alt_screen();
         self.overlay = Some(Overlay::new_transcript(
             self.transcript_cells.clone(),
             self.keymap.pager.clone(),
         ));
-        tui.frame_requester().schedule_frame();
+    }
+
+    /// Sync the live tail and paint the transcript overlay.
+    ///
+    /// This is the canonical draw path for `Overlay::Transcript` (shared with `TuiEvent::Draw`
+    /// handling) so live-tail height and animation ticks stay consistent.
+    fn draw_transcript_overlay(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let active_key = self.chat_widget.active_cell_transcript_key();
+        let (close_overlay, schedule_animation) = {
+            let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut() else {
+                return Ok(());
+            };
+            let chat_widget = &self.chat_widget;
+            tui.draw(u16::MAX, |frame| {
+                let width = frame.area().width.max(1);
+                overlay.sync_live_tail(width, active_key, |w| {
+                    chat_widget.active_cell_transcript_hyperlink_lines(w)
+                });
+                overlay.render(frame.area(), frame.buffer);
+            })?;
+            let close_overlay = overlay.is_done();
+            let schedule_animation = !close_overlay
+                && active_key.is_some_and(|key| key.animation_tick.is_some())
+                && overlay.is_scrolled_to_bottom();
+            (close_overlay, schedule_animation)
+        };
+        if schedule_animation {
+            tui.frame_requester()
+                .schedule_frame_in(std::time::Duration::from_millis(50));
+        }
+        if close_overlay {
+            self.close_transcript_overlay(tui);
+            tui.frame_requester().schedule_frame();
+        }
+        Ok(())
+    }
+
+    /// Open the retained transcript and apply one wheel-up detent immediately.
+    ///
+    /// Mouse tracking consumes wheel events, so the main view uses the transcript overlay as its
+    /// scroll surface. The opening draw runs first so live-tail height is included in scroll math
+    /// before the first detent is applied.
+    pub(crate) fn open_transcript_overlay_with_scroll_up(
+        &mut self,
+        tui: &mut tui::Tui,
+    ) -> Result<()> {
+        // Avoid the open-path frame schedule: we draw once for live-tail, scroll, then schedule a
+        // single frame for the scrolled view.
+        self.enter_transcript_overlay(tui);
+        self.draw_transcript_overlay(tui)?;
+        if let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut()
+            && overlay.scroll_up_one_row(tui.terminal.viewport_area)
+        {
+            tui.frame_requester()
+                .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
+        }
+        Ok(())
     }
 
     /// Close transcript overlay and restore normal UI.
@@ -342,30 +406,9 @@ impl App {
     /// overlay lifecycle and frame scheduling for animations.
     fn overlay_forward_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         if matches!(&event, TuiEvent::Draw | TuiEvent::Resize)
-            && let Some(Overlay::Transcript(t)) = &mut self.overlay
+            && matches!(self.overlay, Some(Overlay::Transcript(_)))
         {
-            let active_key = self.chat_widget.active_cell_transcript_key();
-            let chat_widget = &self.chat_widget;
-            tui.draw(u16::MAX, |frame| {
-                let width = frame.area().width.max(1);
-                t.sync_live_tail(width, active_key, |w| {
-                    chat_widget.active_cell_transcript_hyperlink_lines(w)
-                });
-                t.render(frame.area(), frame.buffer);
-            })?;
-            let close_overlay = t.is_done();
-            if !close_overlay
-                && active_key.is_some_and(|key| key.animation_tick.is_some())
-                && t.is_scrolled_to_bottom()
-            {
-                tui.frame_requester()
-                    .schedule_frame_in(std::time::Duration::from_millis(50));
-            }
-            if close_overlay {
-                self.close_transcript_overlay(tui);
-                tui.frame_requester().schedule_frame();
-            }
-            return Ok(());
+            return self.draw_transcript_overlay(tui);
         }
 
         if let Some(overlay) = &mut self.overlay {

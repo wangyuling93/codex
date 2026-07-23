@@ -18,9 +18,10 @@
 #   Default: upload Actions artifacts only (no GitHub Release / tag).
 #   Leave release_version empty to use the latest stable openai/codex release.
 #   Enable "Publish GitHub Release" to create a prerelease tag:
-#     macos-arm64-v{version}-{7-char commit sha}-{run id}
-#   Short SHA distinguishes commits; run id distinguishes re-dispatches of the
-#   same commit so repeated publishes never collide or silently overwrite.
+#     macos-arm64-v{version}-{7-char commit sha}
+#   Short SHA ties the tag to the built commit: same version + same commit →
+#   same tag. Re-runs and re-dispatches replace assets on that release
+#   (overwrite_files: true).
 
 name: rust-release-macos-arm64-signed
 
@@ -41,10 +42,9 @@ on:
         default: ""
       tag:
         description: >-
-          Optional release tag (macos-arm64-vX.Y.Z[-shortsha[-runid]]). Its
-          version is used when release_version is empty. Otherwise the two must
-          match (optional -abcdef0[-123] uniqueness suffixes are ignored for
-          the version check).
+          Optional release tag (macos-arm64-vX.Y.Z[-shortsha]). Its version is
+          used when release_version is empty. Otherwise the two must match
+          (optional -abcdef0 commit suffix is ignored for the version check).
         required: false
         type: string
         default: ""
@@ -103,17 +103,13 @@ jobs:
           )"
 
           version_re='[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?'
-          # Shared uniqueness fragments: short commit sha, optional workflow run id.
           short_sha_re='[0-9a-f]{7}'
-          run_id_re='[0-9]+'
 
-          # Tag body is version_re, optionally -{short_sha} or -{short_sha}-{run_id}.
+          # Tag body is version_re, optionally -{short_sha}.
           # One strip for extract + compare so both call sites share the contract.
-          strip_optional_tag_suffixes() {
+          strip_optional_short_sha() {
             local body="$1"
-            if [[ "${body}" =~ ^(.*)-${short_sha_re}-${run_id_re}$ ]]; then
-              printf '%s\n' "${BASH_REMATCH[1]}"
-            elif [[ "${body}" =~ ^(.*)-${short_sha_re}$ ]]; then
+            if [[ "${body}" =~ ^(.*)-${short_sha_re}$ ]]; then
               printf '%s\n' "${BASH_REMATCH[1]}"
             else
               printf '%s\n' "${body}"
@@ -126,7 +122,7 @@ jobs:
           elif [[ -n "${INPUT_TAG}" ]]; then
             [[ "${INPUT_TAG}" == "${TAG_PREFIX}"* ]] \
               || { echo "❌  Tag '${INPUT_TAG}' must start with ${TAG_PREFIX}"; exit 1; }
-            release_version="$(strip_optional_tag_suffixes "${INPUT_TAG#"${TAG_PREFIX}"}")"
+            release_version="$(strip_optional_short_sha "${INPUT_TAG#"${TAG_PREFIX}"}")"
             version_source="workflow tag input"
           elif [[ "${source_version}" != "0.0.0" ]]; then
             release_version="${source_version}"
@@ -147,25 +143,21 @@ jobs:
           if [[ -n "${INPUT_TAG}" ]]; then
             release_tag="${INPUT_TAG}"
           else
-            # Uniquify auto tags: short sha (commit) + run id (re-dispatch).
+            # Same version + same commit → same tag; republish overwrites assets.
             short_sha="${GITHUB_SHA:0:7}"
             if [[ ! "${short_sha}" =~ ^${short_sha_re}$ ]]; then
               echo "❌  Could not derive a 7-character commit sha from GITHUB_SHA='${GITHUB_SHA}'"
               exit 1
             fi
-            if [[ ! "${GITHUB_RUN_ID}" =~ ^${run_id_re}$ ]]; then
-              echo "❌  GITHUB_RUN_ID='${GITHUB_RUN_ID}' is not a numeric run id"
-              exit 1
-            fi
-            release_tag="${TAG_PREFIX}${release_version}-${short_sha}-${GITHUB_RUN_ID}"
+            release_tag="${TAG_PREFIX}${release_version}-${short_sha}"
           fi
 
-          # Optional -abcdef0[-runid] distinguishes same-version prereleases.
-          pattern="^${TAG_PREFIX}${version_re}(-${short_sha_re}(-${run_id_re})?)?$"
+          # Optional -abcdef0 ties the tag to the built commit.
+          pattern="^${TAG_PREFIX}${version_re}(-${short_sha_re})?$"
           [[ "${release_tag}" =~ ${pattern} ]] \
-            || { echo "❌  Tag '${release_tag}' must match ${TAG_PREFIX}X.Y.Z[...][-shortsha[-runid]]"; exit 1; }
+            || { echo "❌  Tag '${release_tag}' must match ${TAG_PREFIX}X.Y.Z[...][-shortsha]"; exit 1; }
 
-          tag_ver="$(strip_optional_tag_suffixes "${release_tag#"${TAG_PREFIX}"}")"
+          tag_ver="$(strip_optional_short_sha "${release_tag#"${TAG_PREFIX}"}")"
           [[ "${tag_ver}" == "${release_version}" ]] \
             || { echo "❌  Tag version ${tag_ver} ≠ release version ${release_version}"; exit 1; }
 

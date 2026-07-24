@@ -20,6 +20,7 @@ use codex_tools::ToolCall as ExtensionToolCall;
 use codex_tools::ToolExecutor;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +44,7 @@ pub(crate) struct ToolRouterParams<'a> {
     pub(crate) tool_runtimes: Vec<Arc<dyn CoreToolRuntime>>,
     pub(crate) tool_suggest_candidates: Option<ToolSuggestCandidates>,
     pub(crate) extension_tool_executors: Vec<Arc<dyn ToolExecutor<ExtensionToolCall>>>,
+    pub(crate) wait_for_environment_tool_config: Option<Arc<crate::WaitForEnvironmentToolConfig>>,
     pub(crate) dynamic_tools: &'a [DynamicToolSpec],
 }
 
@@ -84,6 +86,10 @@ impl ToolRouter {
 
     pub(crate) fn model_visible_specs(&self) -> Vec<ToolSpec> {
         self.model_visible_specs.clone()
+    }
+
+    pub(crate) fn deferred_tool_namespaces(&self) -> BTreeMap<String, String> {
+        self.registry.deferred_tool_namespaces()
     }
 
     #[cfg(test)]

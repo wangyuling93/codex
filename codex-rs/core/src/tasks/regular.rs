@@ -47,20 +47,27 @@ impl SessionTask for RegularTask {
         let run_turn_span = trace_span!("run_turn");
         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
         // not wait on startup prewarm resolution.
-        let prewarmed_client_session = async {
-            let event = EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: ctx.sub_id.clone(),
-                trace_id: ctx.trace_id.clone(),
-                started_at: ctx.turn_timing_state.started_at_unix_secs().await,
-                model_context_window: ctx.model_context_window(),
-                collaboration_mode_kind: ctx.mode,
-            });
-            sess.send_event(ctx.as_ref(), event).await;
-            sess.set_server_reasoning_included(/*included*/ false).await;
-            sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
-                .await
-        }
-        .instrument(trace_span!("regular_task.prepare_run_turn"))
+        //
+        // Box the deep prepare / run_turn futures so RegularTask::run's own
+        // state-machine layout stays shallow. Downstream release builds
+        // (codex-mcp-server) otherwise overflow rustc's recursion limit when
+        // computing layout of this async fn.
+        let prewarmed_client_session = Box::pin(
+            async {
+                let event = EventMsg::TurnStarted(TurnStartedEvent {
+                    turn_id: ctx.sub_id.clone(),
+                    trace_id: ctx.trace_id.clone(),
+                    started_at: ctx.turn_timing_state.started_at_unix_secs().await,
+                    model_context_window: ctx.model_context_window(),
+                    collaboration_mode_kind: ctx.mode,
+                });
+                sess.send_event(ctx.as_ref(), event).await;
+                sess.set_server_reasoning_included(/*included*/ false).await;
+                sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
+                    .await
+            }
+            .instrument(trace_span!("regular_task.prepare_run_turn")),
+        )
         .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
@@ -75,15 +82,17 @@ impl SessionTask for RegularTask {
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
         loop {
-            let last_agent_message = run_turn(
-                Arc::clone(&sess),
-                Arc::clone(&ctx),
-                Arc::clone(&turn_extension_data),
-                next_input,
-                prewarmed_client_session.take(),
-                cancellation_token.child_token(),
+            let last_agent_message = Box::pin(
+                run_turn(
+                    Arc::clone(&sess),
+                    Arc::clone(&ctx),
+                    Arc::clone(&turn_extension_data),
+                    next_input,
+                    prewarmed_client_session.take(),
+                    cancellation_token.child_token(),
+                )
+                .instrument(run_turn_span.clone()),
             )
-            .instrument(run_turn_span.clone())
             .await?;
             if !sess.input_queue.has_pending_input(&sess.active_turn).await {
                 return Ok(last_agent_message);

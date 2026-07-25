@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 use tracing::info;
-use tracing::instrument;
 use tracing::trace_span;
 use tracing::warn;
 
@@ -59,7 +58,6 @@ impl SessionStartupPrewarmHandle {
         let _ = self.task.await;
     }
 
-    #[instrument(name = "startup_prewarm.resolve", level = "trace", skip_all)]
     async fn resolve(
         self,
         session_telemetry: &SessionTelemetry,

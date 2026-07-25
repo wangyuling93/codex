@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -20,6 +22,7 @@ use crate::session::turn::build_prompt;
 use codex_otel::STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC;
 use codex_otel::STARTUP_PREWARM_DURATION_METRIC;
 use codex_otel::SessionTelemetry;
+use codex_protocol::ThreadId;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::BaseInstructions;
 
@@ -199,30 +202,15 @@ impl Session {
         let websocket_connect_timeout = self.provider().await.websocket_connect_timeout();
         let started_at = Instant::now();
         let startup_prewarm_session = Arc::clone(self);
-        let startup_prewarm = tokio::spawn(
-            async move {
-                let result =
-                    schedule_startup_prewarm_inner(startup_prewarm_session, base_instructions)
-                        .await;
-                let status = if result.is_ok() { "ready" } else { "failed" };
-                session_telemetry.record_startup_phase(
-                    "startup_prewarm_total",
-                    started_at.elapsed(),
-                    Some(status),
-                );
-                session_telemetry.record_duration(
-                    STARTUP_PREWARM_DURATION_METRIC,
-                    started_at.elapsed(),
-                    &[("status", status)],
-                );
-                result
-            }
-            .instrument(trace_span!(
-                "startup_prewarm",
-                otel.name = "startup_prewarm",
-                thread.id = %self.thread_id(),
-            )),
-        );
+        // Type-erase the instrumented future so dependents never layout
+        // Instrumented<{deep async state machine}> (rustc recursion overflow).
+        let startup_prewarm = tokio::spawn(startup_prewarm_task(
+            startup_prewarm_session,
+            base_instructions,
+            session_telemetry,
+            started_at,
+            self.thread_id(),
+        ));
         self.set_session_startup_prewarm(SessionStartupPrewarmHandle::new(
             startup_prewarm,
             started_at,
@@ -245,6 +233,44 @@ impl Session {
             .resolve(&self.services.session_telemetry, cancellation_token)
             .await
     }
+}
+
+/// Erases the deep instrumented prewarm future behind `dyn Future`.
+///
+/// Wrapping the raw async state machine in `tracing::Instrument` made rustc's
+/// layout queries overflow the default recursion limit in downstream release
+/// builds (e.g. `codex-mcp-server`). Boxing + dyn keeps the same span fields
+/// while giving callers a thin future type.
+fn startup_prewarm_task(
+    session: Arc<Session>,
+    base_instructions: String,
+    session_telemetry: SessionTelemetry,
+    started_at: Instant,
+    thread_id: ThreadId,
+) -> Pin<Box<dyn Future<Output = CodexResult<ModelClientSession>> + Send>> {
+    let span = trace_span!(
+        "startup_prewarm",
+        otel.name = "startup_prewarm",
+        thread.id = %thread_id,
+    );
+    Box::pin(
+        async move {
+            let result = schedule_startup_prewarm_inner(session, base_instructions).await;
+            let status = if result.is_ok() { "ready" } else { "failed" };
+            session_telemetry.record_startup_phase(
+                "startup_prewarm_total",
+                started_at.elapsed(),
+                Some(status),
+            );
+            session_telemetry.record_duration(
+                STARTUP_PREWARM_DURATION_METRIC,
+                started_at.elapsed(),
+                &[("status", status)],
+            );
+            result
+        }
+        .instrument(span),
+    )
 }
 
 async fn schedule_startup_prewarm_inner(

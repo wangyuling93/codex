@@ -14,10 +14,11 @@
 #   codex-aarch64-apple-darwin.dmg
 #
 # Run:
-#   Actions → rust-release-macos-arm64-signed → Run workflow
-#   Default: upload Actions artifacts only (no GitHub Release / tag).
+#   - Automatically on push to main (build, sign, notarize, publish GitHub
+#     prerelease). Covers direct pushes and fork/upstream merges into main.
+#   - Manually: Actions → rust-release-macos-arm64-signed → Run workflow
 #   Leave release_version empty to use the latest stable openai/codex release.
-#   Enable "Publish GitHub Release" to create a prerelease tag:
+#   "Publish GitHub Release" defaults to true (checked). Creates prerelease tag:
 #     macos-arm64-v{version}-{7-char commit sha}
 #   Short SHA ties the tag to the built commit: same version + same commit →
 #   same tag. Re-runs and re-dispatches replace assets on that release
@@ -26,13 +27,16 @@
 name: rust-release-macos-arm64-signed
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       publish_github_release:
         description: Create a GitHub prerelease (and tag) from the built assets
         required: false
         type: boolean
-        default: false
+        default: true
       release_version:
         description: >-
           Version embedded in the binaries. Leave empty to use the latest
@@ -55,7 +59,7 @@ permissions:
 
 # Do not cancel in-progress release builds when re-triggered.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || inputs.tag || 'latest-stable' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || inputs.tag || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -663,7 +667,9 @@ jobs:
           rm -f "${RUNNER_TEMP}/developer-id-application.p12"
 
   publish:
-    if: ${{ inputs.publish_github_release }}
+    # Push to main always publishes; workflow_dispatch follows the checkbox
+    # (default true).
+    if: ${{ github.event_name == 'push' || inputs.publish_github_release }}
     needs:
       - resolve-version
       - sign-and-package

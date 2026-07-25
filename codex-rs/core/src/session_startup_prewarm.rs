@@ -1,14 +1,14 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use futures::future::BoxFuture;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
 use tracing::info;
+use tracing::instrument;
 use tracing::trace_span;
 use tracing::warn;
 
@@ -58,6 +58,7 @@ impl SessionStartupPrewarmHandle {
         let _ = self.task.await;
     }
 
+    #[instrument(name = "startup_prewarm.resolve", level = "trace", skip_all)]
     async fn resolve(
         self,
         session_telemetry: &SessionTelemetry,
@@ -233,19 +234,19 @@ impl Session {
     }
 }
 
-/// Erases the deep instrumented prewarm future behind `dyn Future`.
+/// Erases the deep instrumented prewarm future behind `BoxFuture`.
 ///
 /// Wrapping the raw async state machine in `tracing::Instrument` made rustc's
 /// layout queries overflow the default recursion limit in downstream release
-/// builds (e.g. `codex-mcp-server`). Boxing + dyn keeps the same span fields
-/// while giving callers a thin future type.
+/// builds (e.g. `codex-mcp-server`). Boxing keeps the same span fields while
+/// giving callers a thin future type.
 fn startup_prewarm_task(
     session: Arc<Session>,
     base_instructions: String,
     session_telemetry: SessionTelemetry,
     started_at: Instant,
     thread_id: ThreadId,
-) -> Pin<Box<dyn Future<Output = CodexResult<ModelClientSession>> + Send>> {
+) -> BoxFuture<'static, CodexResult<ModelClientSession>> {
     let span = trace_span!(
         "startup_prewarm",
         otel.name = "startup_prewarm",

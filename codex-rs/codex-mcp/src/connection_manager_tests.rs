@@ -51,7 +51,7 @@ use rmcp::RoleServer;
 use rmcp::ServerHandler;
 use rmcp::ServiceExt;
 use rmcp::model::ClientCapabilities;
-use rmcp::model::CreateElicitationRequestParams;
+use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitationAction;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::Implementation;
@@ -86,6 +86,7 @@ impl McpConnectionSet {
         Self {
             servers: HashMap::new(),
             required_servers: Vec::new(),
+            optional_startup_deadline: OnceLock::new(),
             tool_catalog_revision: Arc::new(RwLock::new(0)),
             codex_apps_tools_override: RwLock::new(None),
             codex_apps_refresh_lock: Mutex::new(()),
@@ -194,6 +195,7 @@ async fn capture_binding(manager: &Arc<McpConnectionSet>) -> McpBinding {
         .capture_binding_with_metadata(
             Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir())),
             /*plugins_available*/ false,
+            /*required_servers*/ &[],
         )
         .await
 }
@@ -226,6 +228,8 @@ struct RefreshTestTransportFactory {
     tool: Tool,
     list_started: Option<Arc<Notify>>,
     release_list: Option<Arc<Notify>>,
+    next_cursor: Option<String>,
+    list_requests: Arc<AtomicUsize>,
 }
 
 impl ServerHandler for RefreshTestTransportFactory {
@@ -238,17 +242,17 @@ impl ServerHandler for RefreshTestTransportFactory {
         _request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        self.list_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Some(list_started) = &self.list_started {
             list_started.notify_one();
         }
         if let Some(release_list) = &self.release_list {
             release_list.notified().await;
         }
-        Ok(ListToolsResult {
-            tools: vec![self.tool.clone()],
-            next_cursor: None,
-            meta: None,
-        })
+        let mut result = ListToolsResult::with_all_items(vec![self.tool.clone()]);
+        result.next_cursor = self.next_cursor.clone();
+        Ok(result)
     }
 }
 
@@ -350,6 +354,48 @@ impl InProcessTransportFactory for DisconnectingToolsTransportFactory {
     }
 }
 
+#[tokio::test]
+async fn legacy_tool_catalog_does_not_follow_pagination_cursor() -> anyhow::Result<()> {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let client = Arc::new(
+        RmcpClient::new_in_process_client(Arc::new(RefreshTestTransportFactory {
+            tool: create_test_tool("legacy", "first-page").tool,
+            list_started: None,
+            release_list: None,
+            next_cursor: Some("next-page".to_string()),
+            list_requests: Arc::clone(&requests),
+        }))
+        .await?,
+    );
+    client
+        .initialize(
+            InitializeRequestParams::new(
+                ClientCapabilities::default(),
+                Implementation::new("codex-test", "0.0.0-test"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_06_18),
+            Some(Duration::from_secs(5)),
+            Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
+        )
+        .await?;
+
+    let tools = list_tools_for_client_uncached(
+        "legacy",
+        /*is_codex_apps_mcp_server*/ false,
+        "test",
+        &client,
+        Some(Duration::from_secs(5)),
+        /*server_instructions*/ None,
+    )
+    .await?;
+
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].tool.name.as_ref(), "first-page");
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    client.shutdown().await;
+    Ok(())
+}
+
 async fn create_test_managed_client(tools: Vec<ToolInfo>) -> ManagedClient {
     ManagedClient {
         client: Arc::new(
@@ -395,6 +441,8 @@ async fn create_test_manager_with_ready_apps_client(
             tool: tool.tool.clone(),
             list_started,
             release_list,
+            next_cursor: None,
+            list_requests: Arc::new(AtomicUsize::new(0)),
         }))
         .await?,
     );
@@ -567,15 +615,13 @@ async fn disabled_permissions_auto_accept_elicitation_with_empty_form_schema() {
 
     let response = sender(
         NumberOrString::Number(1),
-        codex_rmcp_client::Elicitation::Mcp(
-            CreateElicitationRequestParams::FormElicitationParams {
-                meta: None,
-                message: "Confirm?".to_string(),
-                requested_schema: rmcp::model::ElicitationSchema::builder()
-                    .build()
-                    .expect("schema should build"),
-            },
-        ),
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "Confirm?".to_string(),
+            requested_schema: rmcp::model::ElicitationSchema::builder()
+                .build()
+                .expect("schema should build"),
+        }),
     )
     .await
     .expect("elicitation should auto accept");
@@ -604,19 +650,20 @@ async fn disabled_permissions_do_not_auto_accept_elicitation_with_requested_fiel
 
     let response = sender(
         NumberOrString::Number(1),
-        codex_rmcp_client::Elicitation::Mcp(
-            CreateElicitationRequestParams::FormElicitationParams {
-                meta: None,
-                message: "What should I say?".to_string(),
-                requested_schema: rmcp::model::ElicitationSchema::builder()
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message: "What should I say?".to_string(),
+            requested_schema:
+                rmcp::model::ElicitationSchema::builder()
                     .required_property(
                         "message",
-                        rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
+                        rmcp::model::PrimitiveSchemaDefinition::String(
+                            rmcp::model::StringSchema::new(),
+                        ),
                     )
                     .build()
                     .expect("schema should build"),
-            },
-        ),
+        }),
     )
     .await
     .expect("elicitation should auto decline");
@@ -658,15 +705,14 @@ async fn concurrent_authority_updates_never_auto_approve_mixed_policy() {
         }
     });
     let sender = manager.make_sender("server".to_string(), /*tx_event*/ None);
-    let elicitation = codex_rmcp_client::Elicitation::Mcp(
-        CreateElicitationRequestParams::FormElicitationParams {
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "Confirm?".to_string(),
             requested_schema: rmcp::model::ElicitationSchema::builder()
                 .build()
                 .expect("schema should build"),
-        },
-    );
+        });
 
     for _ in 0..1_000 {
         let response = sender(NumberOrString::Number(1), elicitation.clone())
@@ -721,19 +767,21 @@ async fn shared_elicitation_router_targets_the_exact_pending_request() {
     let (tx_event, rx_event) = async_channel::bounded(2);
     let sender_a = manager_a.make_sender("server".to_string(), Some(tx_event.clone()));
     let sender_b = manager_b.make_sender("server".to_string(), Some(tx_event));
-    let elicitation = codex_rmcp_client::Elicitation::Mcp(
-        CreateElicitationRequestParams::FormElicitationParams {
+    let elicitation =
+        codex_rmcp_client::Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "Which runtime?".to_string(),
-            requested_schema: rmcp::model::ElicitationSchema::builder()
-                .required_property(
-                    "runtime",
-                    rmcp::model::PrimitiveSchema::String(rmcp::model::StringSchema::new()),
-                )
-                .build()
-                .expect("schema should build"),
-        },
-    );
+            requested_schema:
+                rmcp::model::ElicitationSchema::builder()
+                    .required_property(
+                        "runtime",
+                        rmcp::model::PrimitiveSchemaDefinition::String(
+                            rmcp::model::StringSchema::new(),
+                        ),
+                    )
+                    .build()
+                    .expect("schema should build"),
+        });
 
     let pending_a = tokio::spawn(sender_a(NumberOrString::Number(1), elicitation.clone()));
     let EventMsg::ElicitationRequest(request_a) = rx_event.recv().await.expect("request A").msg
@@ -1620,6 +1668,87 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn capture_binding_skips_pending_optional_servers_after_one_shared_startup_grace() {
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    let mut plugin_config = crate::mcp::tests::test_mcp_config(std::env::temp_dir());
+    let mut catalog = crate::ResolvedMcpCatalog::builder();
+    catalog.register(crate::McpServerRegistration::from_plugin(
+        "pending-one".to_string(),
+        crate::McpPluginAttribution::new("optional-plugin".to_string(), "Optional".to_string()),
+        /*plugin_order*/ 0,
+        serde_json::from_value(serde_json::json!({ "command": "optional-plugin" }))
+            .expect("optional plugin MCP config"),
+    ));
+    plugin_config.mcp_server_catalog = catalog.build();
+    manager.tool_plugin_provenance = Arc::new(crate::tool_plugin_provenance(&plugin_config));
+    for server_name in ["pending-one", "pending-two"] {
+        manager.insert_test_client(
+            server_name.to_string(),
+            AsyncManagedClient {
+                client: futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+                    .boxed()
+                    .shared(),
+                is_codex_apps_mcp_server: false,
+                cached_server_info: None,
+                codex_apps_tools_cache_context: None,
+                tool_catalog_cache_context: None,
+                startup_complete: Arc::new(AtomicBool::new(false)),
+                startup_reconnect: None,
+                cancel_token: CancellationToken::new(),
+            },
+        );
+    }
+
+    let manager = Arc::new(manager);
+    let binding = tokio::time::timeout(Duration::from_millis(1500), capture_binding(&manager))
+        .await
+        .expect("all optional servers should share a single startup grace");
+    assert!(binding.tools().is_empty());
+
+    let binding = tokio::time::timeout(Duration::from_millis(1), capture_binding(&manager))
+        .await
+        .expect("later bindings must not restart the optional startup grace");
+    assert!(binding.tools().is_empty());
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            binding.list_resources("pending-one", /*params*/ None),
+        )
+        .await
+        .is_err(),
+        "resources must wait for an omitted server instead of failing immediately"
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            binding.list_all_resources(|server| server == "pending-one"),
+        )
+        .await
+        .is_ok(),
+        "resource discovery must not wait for an omitted optional server"
+    );
+
+    let required_servers = vec!["pending-one".to_string()];
+    let binding = tokio::time::timeout(
+        Duration::from_millis(1),
+        manager.capture_binding_with_metadata(
+            Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir())),
+            /*plugins_available*/ false,
+            &required_servers,
+        ),
+    )
+    .await;
+    assert!(binding.is_err(), "explicitly requested servers must wait");
+}
+
 #[tokio::test]
 async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
     let managed_client =
@@ -2376,10 +2505,11 @@ fn elicitation_capability_uses_2025_06_18_shape_for_form_only_support() {
 
 #[test]
 fn elicitation_capability_advertises_url_support_when_enabled() {
-    let capability = Some(ElicitationCapability {
-        form: Some(rmcp::model::FormElicitationCapability::default()),
-        url: Some(rmcp::model::UrlElicitationCapability::default()),
-    });
+    let capability = Some(
+        ElicitationCapability::new()
+            .with_form(rmcp::model::FormElicitationCapability::new())
+            .with_url(rmcp::model::UrlElicitationCapability::new()),
+    );
     assert_eq!(
         serde_json::to_value(capability).expect("serialize elicitation capability"),
         serde_json::json!({
@@ -2571,12 +2701,13 @@ fn reusable_server_identity(
     runtime_context: &McpRuntimeContext,
 ) -> McpServerConnectionIdentity {
     let server = EffectiveMcpServer::configured(config.clone());
+    let resolved_environment = runtime_context.resolve_server_environment("docs", config);
     McpServerConnectionIdentity::new(
         "docs",
         &server,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
-        &Ok(None),
+        &resolved_environment,
         runtime_context,
         /*runtime_auth_provider*/ None,
         /*auth*/ None,
@@ -2797,6 +2928,139 @@ async fn reconciliation_reuses_an_unchanged_ready_server() {
         model_tool_names(&reconciled.list_all_tools().await),
         HashSet::from([ToolName::namespaced("mcp__docs", "search")])
     );
+}
+
+#[tokio::test]
+async fn reconciliation_reuses_legacy_stdio_server_with_existing_protocol_marker() {
+    let runtime_context = McpRuntimeContext::new(
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        PathBuf::from("/tmp"),
+    );
+    let mut config = reusable_server_config("http://127.0.0.1:1");
+    config.transport = McpServerTransportConfig::Stdio {
+        command: "legacy-server".to_string(),
+        args: Vec::new(),
+        env: Some(HashMap::from([(
+            "CODEX_MCP_PROTOCOL_VERSION".to_string(),
+            "1999-01-01".to_string(),
+        )])),
+        env_vars: Vec::new(),
+        cwd: None,
+    };
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+
+    let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
+
+    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+}
+
+#[tokio::test]
+async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
+    let runtime_context = reusable_server_runtime_context();
+    let config = reusable_server_config("http://127.0.0.1:1");
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+    let codex_home = tempdir().expect("tempdir");
+    let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
+
+    let reconciled = McpConnectionSet::new(
+        Some(&previous),
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            config: Arc::new(mcp_config),
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers: HashMap::from([(
+                "docs".to_string(),
+                EffectiveMcpServer::configured(config),
+            )]),
+            submit_id: "refresh".to_string(),
+            tx_event: None,
+            startup_cancellation_token: CancellationToken::new(),
+            runtime_context,
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
+            ),
+            supports_openai_form_elicitation: false,
+            auth: None,
+            codex_apps_auth_manager: None,
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await;
+
+    assert!(!previous.shares_test_connection_with(&reconciled, "docs"));
+}
+
+#[tokio::test]
+async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabled() {
+    let runtime_context = McpRuntimeContext::new(
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        PathBuf::from("/tmp"),
+    );
+    let mut config = reusable_server_config("http://127.0.0.1:1");
+    config.transport = McpServerTransportConfig::Stdio {
+        command: "legacy-server".to_string(),
+        args: Vec::new(),
+        env: None,
+        env_vars: Vec::new(),
+        cwd: None,
+    };
+    let previous = manager_with_reusable_ready_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+    let codex_home = tempdir().expect("tempdir");
+    let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
+
+    let reconciled = McpConnectionSet::new(
+        Some(&previous),
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            config: Arc::new(mcp_config),
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers: HashMap::from([(
+                "docs".to_string(),
+                EffectiveMcpServer::configured(config),
+            )]),
+            submit_id: "refresh".to_string(),
+            tx_event: None,
+            startup_cancellation_token: CancellationToken::new(),
+            runtime_context,
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
+            ),
+            supports_openai_form_elicitation: false,
+            auth: None,
+            codex_apps_auth_manager: None,
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await;
+
+    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
 }
 
 #[tokio::test]

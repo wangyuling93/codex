@@ -20,7 +20,7 @@ use rmcp::model::JsonObject;
 use rmcp::model::ListResourceTemplatesResult;
 use rmcp::model::ListResourcesResult;
 use rmcp::model::ListToolsResult;
-use rmcp::model::Meta;
+use rmcp::model::MetaObject;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
@@ -93,7 +93,7 @@ impl TestToolServer {
             Arc::new(thread_hint_schema),
         );
         thread_hint_tool.annotations = Some(ToolAnnotations::new().read_only(true));
-        let mut thread_hint_meta = Meta::new();
+        let mut thread_hint_meta = MetaObject::new();
         thread_hint_meta.insert("ui".to_string(), json!({ "visibility": [] }));
         thread_hint_tool.meta = Some(thread_hint_meta);
 
@@ -513,7 +513,7 @@ impl ServerHandler for TestToolServer {
 
     fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         let tools = self.tools.clone();
@@ -524,10 +524,28 @@ impl ServerHandler for TestToolServer {
                 && let Some(cwd) = tools.iter_mut().find(|tool| tool.name == "cwd")
             {
                 cwd.meta
-                    .get_or_insert_with(Meta::new)
+                    .get_or_insert_with(MetaObject::new)
                     .insert("ui".to_string(), json!({ "visibility": ["app"] }));
             }
-            Ok(ListToolsResult::with_all_items(tools))
+            let mut result = ListToolsResult::with_all_items(tools);
+            match (
+                std::env::var("MCP_TEST_TOOL_PAGINATION").as_deref(),
+                request.and_then(|request| request.cursor).as_deref(),
+            ) {
+                (Ok("two-pages"), None) => {
+                    result.tools.retain(|tool| tool.name == "echo");
+                    result.next_cursor = Some("second".to_string());
+                }
+                (Ok("two-pages"), Some("second")) => {
+                    result.tools.retain(|tool| tool.name == "sync");
+                }
+                (Ok("oversized-cursor"), None) => {
+                    result.tools.retain(|tool| tool.name == "echo");
+                    result.next_cursor = Some("x".repeat(65_537));
+                }
+                _ => {}
+            }
+            Ok(result)
         }
     }
 
@@ -637,7 +655,7 @@ impl ServerHandler for TestToolServer {
                 Ok(Self::structured_result(structured_content))
             }
             "encrypted_output" => {
-                let mut meta = Meta::new();
+                let mut meta = MetaObject::new();
                 meta.insert("codex/encryptedContent".to_string(), json!(true));
                 let mut result = CallToolResult::success(vec![
                     rmcp::model::ContentBlock::text("Lookup completed"),
@@ -729,7 +747,7 @@ impl TestToolServer {
                 content.push(rmcp::model::ContentBlock::image(valid_data_b64, mime_type));
             }
             ImageScenario::ImageOnlyOriginalDetail => {
-                let mut meta = rmcp::model::Meta::new();
+                let mut meta = MetaObject::new();
                 meta.insert(
                     "codex/imageDetail".to_string(),
                     serde_json::json!("original"),

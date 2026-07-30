@@ -17,6 +17,7 @@ use crate::keymap::RuntimeKeymap;
 use crate::keymap::VimNormalKeymap;
 use crate::keymap::VimOperatorKeymap;
 use crate::keymap::VimTextObjectKeymap;
+use crate::width::display_width;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement as UserTextElement;
 use crossterm::event::KeyCode;
@@ -35,7 +36,6 @@ use std::cell::RefCell;
 use std::ops::Range;
 use textwrap::Options;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 mod mouse;
 pub(crate) use self::mouse::MouseSelectionUpdate;
@@ -446,7 +446,7 @@ impl TextArea {
         let effective_scroll = self.effective_scroll(area.height, &lines, state.scroll);
         let i = Self::wrapped_line_index_by_start(&lines, self.cursor_pos)?;
         let ls = &lines[i];
-        let col = text_for_display(&self.text[ls.start..self.cursor_pos]).width() as u16;
+        let col = display_width(&text_for_display(&self.text[ls.start..self.cursor_pos])) as u16;
         let screen_row = i
             .saturating_sub(effective_scroll as usize)
             .try_into()
@@ -460,7 +460,7 @@ impl TextArea {
 
     fn current_display_col(&self) -> usize {
         let bol = self.beginning_of_current_line();
-        text_for_display(&self.text[bol..self.cursor_pos]).width()
+        display_width(&text_for_display(&self.text[bol..self.cursor_pos]))
     }
 
     fn wrapped_line_index_by_start(lines: &[Range<usize>], pos: usize) -> Option<usize> {
@@ -489,7 +489,7 @@ impl TextArea {
         let mut width_so_far = 0usize;
         let display_line = text_for_display(&self.text[line_start..line_end]);
         for (i, g) in display_line.grapheme_indices(true) {
-            width_so_far += g.width();
+            width_so_far += display_width(g);
             if width_so_far > target_col {
                 return line_start + i;
             }
@@ -1262,7 +1262,9 @@ impl TextArea {
                 if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor_pos) {
                     let cur_range = &lines[idx];
                     let target_col = self.preferred_col.unwrap_or_else(|| {
-                        text_for_display(&self.text[cur_range.start..self.cursor_pos]).width()
+                        display_width(&text_for_display(
+                            &self.text[cur_range.start..self.cursor_pos],
+                        ))
                     });
                     if idx > 0 {
                         let prev = &lines[idx - 1];
@@ -1326,7 +1328,9 @@ impl TextArea {
                 if let Some(idx) = Self::wrapped_line_index_by_start(lines, self.cursor_pos) {
                     let cur_range = &lines[idx];
                     let target_col = self.preferred_col.unwrap_or_else(|| {
-                        text_for_display(&self.text[cur_range.start..self.cursor_pos]).width()
+                        display_width(&text_for_display(
+                            &self.text[cur_range.start..self.cursor_pos],
+                        ))
                     });
                     if idx + 1 < lines.len() {
                         let next = &lines[idx + 1];
@@ -2050,8 +2054,9 @@ impl TextArea {
                     continue;
                 }
                 let styled = &self.text[overlap_start..overlap_end];
-                let x_off =
-                    text_for_display(&self.text[line_range.start..overlap_start]).width() as u16;
+                let x_off = display_width(&text_for_display(
+                    &self.text[line_range.start..overlap_start],
+                )) as u16;
                 let style = base_style.fg(Color::Cyan);
                 buf.set_string(area.x + x_off, y, text_for_display(styled), style);
             }
@@ -2063,8 +2068,9 @@ impl TextArea {
                 let overlap_end = highlight_range.end.min(line_range.end);
                 if overlap_start < overlap_end {
                     let highlighted = &self.text[overlap_start..overlap_end];
-                    let x_off = text_for_display(&self.text[line_range.start..overlap_start])
-                        .width() as u16;
+                    let x_off = display_width(&text_for_display(
+                        &self.text[line_range.start..overlap_start],
+                    )) as u16;
                     buf.set_string(area.x + x_off, y, text_for_display(highlighted), *style);
                 }
 
@@ -2077,7 +2083,7 @@ impl TextArea {
                     && area.width > 0
                 {
                     let line_width =
-                        text_for_display(&self.text[line_range.clone()]).width() as u16;
+                        display_width(&text_for_display(&self.text[line_range.clone()])) as u16;
                     let x_off = line_width.min(area.width.saturating_sub(1));
                     buf.set_style(Rect::new(area.x + x_off, y, 1, 1), *style);
                 }
@@ -2098,8 +2104,8 @@ impl TextArea {
             let y = area.y + row as u16;
             let line_range = r.start..r.end - 1;
             let masked = self.text[line_range.clone()]
-                .chars()
-                .map(|_| mask_char)
+                .graphemes(/*is_extended*/ true)
+                .flat_map(|grapheme| std::iter::repeat_n(mask_char, display_width(grapheme)))
                 .collect::<String>();
             buf.set_string(area.x, y, &masked, Style::default());
         }
@@ -3587,6 +3593,90 @@ mod tests {
         assert_eq!(t.desired_height(area.width), 2);
         assert_eq!(t.cursor_pos(area), Some((1, 1)));
         assert_eq!(buf[(0, 1)].symbol(), "5");
+    }
+
+    #[test]
+    fn halfwidth_sound_marks_wrap_and_align_with_the_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut snapshots = Vec::new();
+        for (label, text, width, cursor, cells) in [
+            ("dakuten", "12ｶﾞx", 4, (1, 1), [(2, 0, "ｶﾞ"), (0, 1, "x")]),
+            ("handakuten", "abﾊﾟc", 3, (3, 1), [(0, 1, "ﾊﾟ"), (2, 1, "c")]),
+            ("standalone", "a ﾞb", 2, (2, 1), [(0, 1, "ﾞ"), (1, 1, "b")]),
+        ] {
+            let mut t = ta_with(text);
+            t.set_cursor(text.len());
+            let area = Rect::new(0, 0, width, /*height*/ 2);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    ratatui::widgets::WidgetRef::render_ref(
+                        &(&t),
+                        frame.area(),
+                        frame.buffer_mut(),
+                    );
+                })
+                .unwrap();
+
+            assert_eq!(t.desired_height(area.width), 2);
+            assert_eq!(t.cursor_pos(area), Some(cursor));
+            for (x, y, expected) in cells {
+                assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), expected);
+            }
+            snapshots.push(format!(
+                "{label}\ncursor: {:?}\n{}",
+                t.cursor_pos(area),
+                terminal.backend()
+            ));
+        }
+
+        insta::assert_snapshot!(
+            "textarea_halfwidth_sound_marks_wrap_and_align_with_cursor",
+            snapshots.join("\n\n")
+        );
+    }
+
+    #[test]
+    fn masked_graphemes_align_with_the_cursor() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let text = "界ﾞa";
+        let mut t = ta_with(text);
+        t.set_cursor(text.len());
+        let area = Rect::new(0, 0, /*width*/ 4, /*height*/ 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let mut state = TextAreaState::default();
+        terminal
+            .draw(|frame| {
+                t.render_ref_masked(frame.area(), frame.buffer_mut(), &mut state, '*');
+            })
+            .unwrap();
+
+        assert_eq!(t.cursor_pos(area), Some((4, 0)));
+        insta::assert_snapshot!(
+            "textarea_masked_graphemes_align_with_cursor",
+            format!("cursor: {:?}\n{}", t.cursor_pos(area), terminal.backend())
+        );
+    }
+
+    #[test]
+    fn overwide_halfwidth_sound_marks_do_not_add_a_phantom_cursor_row() {
+        let area = Rect::new(0, 0, /*width*/ 2, /*height*/ 2);
+
+        for grapheme in ["ｶﾞﾞ", "界ﾞ"] {
+            let text = format!("{grapheme}ab");
+            let mut t = ta_with(&text);
+            t.set_cursor(text.len());
+
+            assert_eq!(t.desired_height(area.width), 2);
+            assert_eq!(t.cursor_pos(area), Some((2, 1)));
+
+            t.set_cursor(grapheme.len());
+            assert_eq!(t.cursor_pos(area), Some((0, 1)));
+        }
     }
 
     #[test]

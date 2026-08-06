@@ -144,8 +144,7 @@ impl ChatWidget {
                 || (self.bottom_pane.is_task_running()
                     && (self.mcp_startup_status.is_none()
                         || self.input_queue.user_turn_pending_start))
-                || (cmd == SlashCommand::Transparent
-                    && self.input_queue.user_turn_pending_start)))
+                || (cmd == SlashCommand::Transparent && self.input_queue.user_turn_pending_start)))
             || (cmd == SlashCommand::Resume
                 && (self.input_queue.user_turn_pending_start
                     || self.turn_lifecycle.agent_turn_running))

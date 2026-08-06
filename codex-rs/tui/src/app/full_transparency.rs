@@ -33,7 +33,8 @@ impl App {
         }
 
         let reflow_ran_during_stream = self.should_mark_reflow_as_stream_time();
-        self.reflow_transcript_now(tui)?;
+        let terminal_width = tui.terminal.last_known_screen_size.into();
+        self.reflow_transcript_now(tui, terminal_width)?;
         if reflow_ran_during_stream {
             self.transcript_reflow.mark_ran_during_stream();
         }

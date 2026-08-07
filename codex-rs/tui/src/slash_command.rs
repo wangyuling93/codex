@@ -44,6 +44,7 @@ pub enum SlashCommand {
     Side,
     Btw,
     Copy,
+    Export,
     Raw,
     Transparent,
     Diff,
@@ -97,6 +98,7 @@ impl SlashCommand {
             SlashCommand::App => "continue this session in the Desktop app",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Copy => "copy last response as markdown",
+            SlashCommand::Export => "export the conversation as markdown",
             SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
             SlashCommand::Transparent => "toggle fully transparent TUI backgrounds",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -165,6 +167,7 @@ impl SlashCommand {
                 | SlashCommand::Ide
                 | SlashCommand::Keymap
                 | SlashCommand::Mcp
+                | SlashCommand::Export
                 | SlashCommand::Raw
                 | SlashCommand::Transparent
                 | SlashCommand::Usage
@@ -181,6 +184,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Copy
+                | SlashCommand::Export
                 | SlashCommand::Raw
                 | SlashCommand::Transparent
                 | SlashCommand::Diff
@@ -200,6 +204,7 @@ impl SlashCommand {
             | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::Export
             | SlashCommand::Keymap
             | SlashCommand::Vim
             | SlashCommand::Transparent

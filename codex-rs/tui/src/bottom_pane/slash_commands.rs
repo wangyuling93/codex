@@ -329,6 +329,7 @@ mod tests {
             vec![
                 SlashCommand::Ide,
                 SlashCommand::Copy,
+                SlashCommand::Export,
                 SlashCommand::Raw,
                 SlashCommand::Transparent,
                 SlashCommand::Diff,

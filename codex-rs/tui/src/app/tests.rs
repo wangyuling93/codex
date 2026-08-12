@@ -5208,7 +5208,8 @@ async fn main_view_mouse_scroll_opens_transcript_only_without_a_popup() -> Resul
     assert!(app.chat_widget.no_modal_or_popup_active());
 
     app.chat_widget.apply_external_edit(String::from("hello"));
-    let rendered_area = app.render_chat_widget_frame(&mut tui)?;
+    let screen_size = tui.terminal.last_known_screen_size;
+    let rendered_area = app.render_chat_widget_frame(&mut tui, screen_size)?;
     let (cursor_x, cursor_y) = app
         .chat_widget
         .as_renderable()

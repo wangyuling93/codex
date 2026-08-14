@@ -4,7 +4,11 @@ use super::*;
 
 impl ChatWidget {
     pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
-        self.bottom_pane.handle_mouse_event(mouse_event);
+        if let crate::bottom_pane::ComposerMouseOutcome::SelectionFinished(text) =
+            self.bottom_pane.handle_mouse_event(mouse_event)
+        {
+            self.copy_composer_text(&text);
+        }
     }
 
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {

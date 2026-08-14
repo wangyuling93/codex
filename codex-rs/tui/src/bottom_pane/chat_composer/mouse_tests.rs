@@ -16,7 +16,12 @@ use std::time::Instant;
 use tokio::sync::mpsc::unbounded_channel;
 
 use super::ChatComposer;
+use super::ComposerMouseOutcome;
 use super::LARGE_PASTE_CHAR_THRESHOLD;
+
+fn assert_handled(outcome: ComposerMouseOutcome) {
+    assert!(outcome.is_handled(), "{outcome:?}");
+}
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
@@ -55,7 +60,11 @@ fn modifiers_on_row(terminal: &Terminal<TestBackend>, x: u16, y: u16, width: u16
         .collect()
 }
 
-fn drag_select_range(composer: &mut ChatComposer, anchor: usize, active: usize) {
+fn drag_select_range(
+    composer: &mut ChatComposer,
+    anchor: usize,
+    active: usize,
+) -> ComposerMouseOutcome {
     let width = 100;
     let height = composer.desired_height(width);
     let area = Rect::new(/*x*/ 0, /*y*/ 0, width, height);
@@ -67,21 +76,21 @@ fn drag_select_range(composer: &mut ChatComposer, anchor: usize, active: usize) 
     let anchor = textarea_area.x + anchor as u16;
     let active = textarea_area.x + active as u16;
 
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         anchor,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Drag(MouseButton::Left),
         active,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    composer.handle_mouse_event(mouse_event(
         MouseEventKind::Up(MouseButton::Left),
         active,
         textarea_area.y,
-    )));
+    ))
 }
 
 #[test]
@@ -97,14 +106,14 @@ fn clicking_composer_supports_inserting_and_deleting_at_position() {
         .expect("initial render");
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
-    assert!(composer.handle_mouse_event(left_click(textarea_area.x + 5, textarea_area.y)));
+    assert_handled(composer.handle_mouse_event(left_click(textarea_area.x + 5, textarea_area.y)));
     composer.handle_key_event(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
     assert_eq!(composer.draft.textarea.text(), "hello, world");
 
     terminal
         .draw(|frame| composer.render(frame.area(), frame.buffer_mut()))
         .expect("render after insertion");
-    assert!(composer.handle_mouse_event(left_click(textarea_area.x + 7, textarea_area.y)));
+    assert_handled(composer.handle_mouse_event(left_click(textarea_area.x + 7, textarea_area.y)));
     composer.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
     assert_eq!(composer.draft.textarea.text(), "hello, orld");
 
@@ -134,17 +143,17 @@ fn dragging_selects_text_that_delete_removes() {
     let selection_start = textarea_area.x + 5;
     let selection_end = textarea_area.x + 11;
 
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         selection_start,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Drag(MouseButton::Left),
         selection_end,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Up(MouseButton::Left),
         selection_end,
         textarea_area.y,
@@ -217,17 +226,17 @@ fn dragging_past_right_edge_selects_the_final_character() {
         .expect("initial render");
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         textarea_area.x,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Drag(MouseButton::Left),
         textarea_area.right(),
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Up(MouseButton::Left),
         textarea_area.right(),
         textarea_area.y,
@@ -261,17 +270,17 @@ fn selection_highlight_after_tab_uses_display_columns() {
         .expect("initial render");
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         textarea_area.x + 2,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Drag(MouseButton::Left),
         textarea_area.x + 4,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Up(MouseButton::Left),
         textarea_area.x + 4,
         textarea_area.y,
@@ -317,17 +326,17 @@ fn newline_only_selection_highlights_the_end_of_line_cell() {
         .expect("initial render");
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         textarea_area.x,
         textarea_area.y + 1,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Drag(MouseButton::Left),
         textarea_area.x + 3,
         textarea_area.y,
     )));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Up(MouseButton::Left),
         textarea_area.x + 3,
         textarea_area.y,
@@ -390,8 +399,8 @@ fn clicking_large_paste_placeholder_selects_and_deletes_the_paste() {
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
     let clicked_column = textarea_area.x + 2;
-    assert!(composer.handle_mouse_event(left_click(clicked_column, textarea_area.y)));
-    assert!(composer.handle_mouse_event(mouse_event(
+    assert_handled(composer.handle_mouse_event(left_click(clicked_column, textarea_area.y)));
+    assert_handled(composer.handle_mouse_event(mouse_event(
         MouseEventKind::Up(MouseButton::Left),
         clicked_column,
         textarea_area.y,
@@ -688,7 +697,11 @@ fn composer_ignores_clicks_before_render_and_outside_textarea() {
     let outside_textarea = composer.handle_mouse_event(left_click(area.x, area.y));
 
     assert_eq!(
-        (before_render, outside_textarea, composer.cursor()),
+        (
+            before_render.is_handled(),
+            outside_textarea.is_handled(),
+            composer.cursor()
+        ),
         (false, false, 5)
     );
 }
@@ -715,7 +728,7 @@ fn clicking_outside_textarea_clears_active_selection() {
 
     assert_eq!(
         (
-            handled,
+            handled.is_handled(),
             composer.draft.textarea.selection_range(),
             composer.cursor()
         ),
@@ -737,9 +750,9 @@ fn clicking_inside_image_placeholder_clamps_to_an_editable_edge() {
         .expect("render");
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
-    assert!(composer.handle_mouse_event(left_click(textarea_area.x + 2, textarea_area.y)));
+    assert_handled(composer.handle_mouse_event(left_click(textarea_area.x + 2, textarea_area.y)));
     assert_eq!(composer.cursor(), 0);
-    assert!(composer.handle_mouse_event(left_click(
+    assert_handled(composer.handle_mouse_event(left_click(
         textarea_area.x + placeholder.len() as u16 - 1,
         textarea_area.y,
     )));
@@ -770,7 +783,7 @@ fn clicking_flushes_buffered_input_before_moving_the_cursor() {
         .expect("render");
     let [_, _, textarea_area, _] = composer.layout_areas(area);
 
-    assert!(composer.handle_mouse_event(left_click(textarea_area.x, textarea_area.y)));
+    assert_handled(composer.handle_mouse_event(left_click(textarea_area.x, textarea_area.y)));
     assert_eq!(
         (
             composer.draft.textarea.text(),
@@ -778,5 +791,40 @@ fn clicking_flushes_buffered_input_before_moving_the_cursor() {
             composer.is_in_paste_burst(),
         ),
         ("worldhello ", 0, false)
+    );
+}
+
+#[test]
+fn finishing_a_mouse_selection_returns_the_selected_text() {
+    let mut composer = test_composer();
+    composer.insert_str("hello world");
+    let outcome = drag_select_range(&mut composer, /*anchor*/ 6, /*active*/ 11);
+
+    assert_eq!(
+        outcome,
+        ComposerMouseOutcome::SelectionFinished("world".to_string())
+    );
+    assert_eq!(composer.selected_text().as_deref(), Some("world"));
+}
+
+#[test]
+fn super_c_does_not_replace_a_mouse_selection() {
+    let (tx, _rx) = unbounded_channel::<AppEvent>();
+    let mut composer = ChatComposer::new(
+        /*has_input_focus*/ true,
+        AppEventSender::new(tx),
+        /*enhanced_keys_supported*/ false,
+        "Ask Codex to do anything".to_string(),
+        /*disable_paste_burst*/ false,
+    );
+    composer.insert_str("hello world");
+    drag_select_range(&mut composer, /*anchor*/ 6, /*active*/ 11);
+
+    let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+    assert!(composer.flush_paste_burst_if_due() || !composer.is_in_paste_burst());
+
+    assert_eq!(
+        (composer.current_text(), composer.selected_text()),
+        ("hello world".to_string(), Some("world".to_string()))
     );
 }

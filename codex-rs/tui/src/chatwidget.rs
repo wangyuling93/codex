@@ -386,6 +386,8 @@ use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
 mod notifications;
 use self::notifications::Notification;
+mod composer_copy;
+use self::composer_copy::CopyToast;
 mod permission_popups;
 mod permissions_menu;
 pub(crate) use self::permissions_menu::auto_review_available;
@@ -598,6 +600,7 @@ pub(crate) struct ChatWidget {
     pending_stream_consolidations: usize,
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
+    copy_toast: Option<CopyToast>,
     copy_last_response_binding: Vec<KeyBinding>,
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_metadata: HashMap<ThreadId, AgentMetadata>,
@@ -1204,6 +1207,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
+        self.expire_copy_toast();
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
         self.bottom_pane.pre_draw_tick();

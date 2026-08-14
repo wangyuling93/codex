@@ -173,9 +173,7 @@ pub(crate) fn is_plain_text_key_event(event: KeyEvent) -> bool {
             code: KeyCode::Char(ch),
             modifiers,
             ..
-        } if !ch.is_ascii_control()
-            && !modifiers.contains(KeyModifiers::CONTROL)
-            && !modifiers.contains(KeyModifiers::ALT)
+        } if !ch.is_ascii_control() && !has_shortcut_modifiers(modifiers)
     )
 }
 
@@ -236,6 +234,13 @@ fn key_hint_style() -> Style {
 
 pub(crate) fn has_ctrl_or_alt(mods: KeyModifiers) -> bool {
     (mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::ALT)) && !is_altgr(mods)
+}
+
+/// True for modifier combinations that are shortcuts rather than typed text.
+///
+/// Includes Command/`SUPER` so macOS Cmd+letter is not treated as inserting that letter.
+pub(crate) fn has_shortcut_modifiers(mods: KeyModifiers) -> bool {
+    has_ctrl_or_alt(mods) || mods.contains(KeyModifiers::SUPER)
 }
 
 #[cfg(windows)]
@@ -408,10 +413,19 @@ mod tests {
         assert!(!has_ctrl_or_alt(KeyModifiers::NONE));
         assert!(has_ctrl_or_alt(KeyModifiers::CONTROL));
         assert!(has_ctrl_or_alt(KeyModifiers::ALT));
+        assert!(!has_ctrl_or_alt(KeyModifiers::SUPER));
 
         #[cfg(windows)]
         assert!(!has_ctrl_or_alt(KeyModifiers::CONTROL | KeyModifiers::ALT));
         #[cfg(not(windows))]
         assert!(has_ctrl_or_alt(KeyModifiers::CONTROL | KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn has_shortcut_modifiers_includes_super() {
+        assert!(!has_shortcut_modifiers(KeyModifiers::NONE));
+        assert!(has_shortcut_modifiers(KeyModifiers::CONTROL));
+        assert!(has_shortcut_modifiers(KeyModifiers::SUPER));
+        assert!(!has_shortcut_modifiers(KeyModifiers::SHIFT));
     }
 }

@@ -72,7 +72,7 @@ impl ChatWidget {
                     /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
                 )),
         );
-        RenderableItem::Owned(Box::new(flex))
+        self.wrap_renderable_with_copy_toast(RenderableItem::Owned(Box::new(flex)))
     }
 
     pub(crate) fn note_rendered_width(&self, width: u16) {

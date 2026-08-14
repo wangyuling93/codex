@@ -13,7 +13,7 @@ use ratatui::widgets::Widget;
 use std::cell::RefCell;
 use std::time::Instant;
 
-use crate::key_hint::has_ctrl_or_alt;
+use crate::key_hint::has_shortcut_modifiers;
 use crate::render::renderable::Renderable;
 
 use super::popup_consts::standard_popup_hint_line;
@@ -99,7 +99,7 @@ impl CustomPromptView {
                 code: KeyCode::Char(_),
                 modifiers,
                 ..
-            } if !has_ctrl_or_alt(modifiers) && self.textarea.allows_paste_burst() => {
+            } if !has_shortcut_modifiers(modifiers) && self.textarea.allows_paste_burst() => {
                 let paste_like_burst = self.paste_burst.on_plain_char_no_hold(now).is_some();
                 self.textarea.input(key_event);
                 if paste_like_burst {
@@ -110,7 +110,7 @@ impl CustomPromptView {
                 code: KeyCode::Tab,
                 modifiers,
                 ..
-            } if !has_ctrl_or_alt(modifiers) && self.textarea.allows_paste_burst() => {
+            } if !has_shortcut_modifiers(modifiers) && self.textarea.allows_paste_burst() => {
                 let in_paste_burst = self.paste_burst.direct_insert_newline_should_insert(now);
                 self.textarea.input(key_event);
                 if in_paste_burst {

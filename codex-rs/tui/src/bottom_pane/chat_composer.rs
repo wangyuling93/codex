@@ -173,7 +173,7 @@
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::ShortcutHint;
-use crate::key_hint::has_ctrl_or_alt;
+use crate::key_hint::has_shortcut_modifiers;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::ui_consts::FOOTER_INDENT_COLS;
 use codex_message_history::HistoryBatchCursor;
@@ -272,6 +272,7 @@ mod draft_state;
 mod footer_state;
 mod history_search;
 mod mouse;
+pub(crate) use self::mouse::ComposerMouseOutcome;
 mod popup_state;
 mod slash_input;
 
@@ -3542,17 +3543,17 @@ impl ChatComposer {
 
         // Intercept plain Char inputs to optionally accumulate into a burst buffer.
         //
-        // This is intentionally limited to "plain" (no Ctrl/Alt) chars so shortcuts keep their
-        // normal semantics, and so we can aggressively flush/clear any burst state when non-char
-        // keys are pressed.
+        // This is intentionally limited to "plain" (no shortcut-modifier) chars so shortcuts keep
+        // their normal semantics, and so we can aggressively flush/clear any burst state when
+        // non-char keys are pressed. Super is included so macOS Cmd+letter is not treated as text.
         if let KeyEvent {
             code: KeyCode::Char(ch),
             modifiers,
             ..
         } = input
         {
-            let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
-            if !has_ctrl_or_alt
+            let has_shortcut_modifiers = has_shortcut_modifiers(modifiers);
+            if !has_shortcut_modifiers
                 && !self.draft.disable_paste_burst
                 && self.draft.textarea.allows_paste_burst()
             {
@@ -3642,8 +3643,7 @@ impl ChatComposer {
         } = input;
         match code {
             KeyCode::Char(_) => {
-                let has_ctrl_or_alt = has_ctrl_or_alt(modifiers);
-                if has_ctrl_or_alt {
+                if has_shortcut_modifiers(modifiers) {
                     self.draft.paste_burst.clear_window_after_non_char();
                 }
             }

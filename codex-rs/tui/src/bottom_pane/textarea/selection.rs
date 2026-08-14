@@ -66,6 +66,25 @@ impl TextArea {
         self.selection = None;
     }
 
+    /// Selected UTF-8 slice, if a non-empty selection is active.
+    pub(crate) fn selected_text(&self) -> Option<&str> {
+        self.selection_range().map(|range| &self.text[range])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_byte_range(&mut self, range: Range<usize>) {
+        let start = range.start.min(self.text.len());
+        let end = range.end.min(self.text.len());
+        if start >= end {
+            self.clear_selection();
+            return;
+        }
+        self.begin_selection(start, None);
+        self.set_selection_endpoint(end, None);
+        self.cursor_pos = end;
+        self.finish_selection();
+    }
+
     /// Byte range of the active selection, expanded through any intersecting atomic elements.
     pub(crate) fn selection_range(&self) -> Option<Range<usize>> {
         let selection = self.selection.as_ref()?;

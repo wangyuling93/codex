@@ -220,13 +220,15 @@ fn mouse_selection_is_deleted_or_replaced_by_editing_keys() {
         /*x*/ 2, /*y*/ 3, /*width*/ 20, /*height*/ 1,
     );
     let edits = [
-        (KeyCode::Backspace, "hello"),
-        (KeyCode::Delete, "hello"),
-        (KeyCode::Char('!'), "hello!"),
+        (KeyCode::Backspace, KeyModifiers::NONE, "hello"),
+        (KeyCode::Delete, KeyModifiers::NONE, "hello"),
+        (KeyCode::Char('!'), KeyModifiers::NONE, "hello!"),
+        (KeyCode::Char('c'), KeyModifiers::SUPER, "hello world"),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL, "hello world"),
     ];
     let mut actual = Vec::new();
 
-    for (key_code, expected_text) in edits {
+    for (key_code, modifiers, expected_text) in edits {
         let mut textarea = textarea_with_text("hello world");
         assert!(textarea.set_cursor_from_screen_position(
             area,
@@ -248,7 +250,7 @@ fn mouse_selection_is_deleted_or_replaced_by_editing_keys() {
         ));
         let selection_before_edit = textarea.selection_range();
 
-        textarea.input(KeyEvent::new(key_code, KeyModifiers::NONE));
+        textarea.input(KeyEvent::new(key_code, modifiers));
         actual.push((
             selection_before_edit,
             textarea.text().to_string(),
@@ -265,6 +267,8 @@ fn mouse_selection_is_deleted_or_replaced_by_editing_keys() {
             (Some(5..11), "hello".to_string(), 5, None),
             (Some(5..11), "hello".to_string(), 5, None),
             (Some(5..11), "hello!".to_string(), 6, None),
+            (Some(5..11), "hello world".to_string(), 5, Some(5..11)),
+            (Some(5..11), "hello world".to_string(), 5, Some(5..11)),
         ]
     );
 }

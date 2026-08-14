@@ -195,6 +195,7 @@ pub(crate) enum CancellationEvent {
 use crate::bottom_pane::prompt_args::parse_slash_name;
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
+pub(crate) use chat_composer::ComposerMouseOutcome;
 pub(crate) use chat_composer::InputResult;
 pub(crate) use chat_composer::QueuedInputAction;
 pub(crate) use chat_composer_history::HistoryEntry;
@@ -675,7 +676,7 @@ impl BottomPane {
             }
             let records_composer_activity =
                 matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                    && !key_hint::has_ctrl_or_alt(key_event.modifiers)
+                    && !key_hint::has_shortcut_modifiers(key_event.modifiers)
                     && matches!(
                         key_event.code,
                         KeyCode::Char(_)
@@ -699,10 +700,15 @@ impl BottomPane {
     }
 
     /// Forward mouse input to the composer when no modal bottom-pane view is active.
-    pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
-        if self.view_stack.is_empty() && self.composer.handle_mouse_event(mouse_event) {
+    pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) -> ComposerMouseOutcome {
+        if !self.view_stack.is_empty() {
+            return ComposerMouseOutcome::Ignored;
+        }
+        let outcome = self.composer.handle_mouse_event(mouse_event);
+        if outcome.is_handled() {
             self.request_redraw();
         }
+        outcome
     }
 
     /// Return the contexts whose ordinary handlers can consume the next key.
@@ -885,6 +891,21 @@ impl BottomPane {
     /// Get the current composer text (for tests and programmatic checks).
     pub(crate) fn composer_text(&self) -> String {
         self.composer.current_text()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_selected_text(&self) -> Option<String> {
+        self.composer.selected_text()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_composer_byte_range(&mut self, range: std::ops::Range<usize>) {
+        self.composer.select_byte_range(range);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composer_textarea_area(&self) -> Option<ratatui::layout::Rect> {
+        self.composer.last_textarea_area()
     }
 
     #[cfg(test)]

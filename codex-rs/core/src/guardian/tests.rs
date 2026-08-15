@@ -628,7 +628,7 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
     let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0] else {
         panic!("parent environment should be ready");
     };
-    environment.config.permission_profile =
+    environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(environment_permission_profile);
     environment.selection.workspace_roots = vec![
         PathUri::from_abs_path(&workspace_root),
@@ -2981,6 +2981,72 @@ async fn guardian_review_does_not_retry_valid_denial() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    struct AutoApprovingReviewContributor;
+
+    impl codex_extension_api::ApprovalReviewContributor for AutoApprovingReviewContributor {
+        fn contribute<'a>(
+            &'a self,
+            _session_store: &'a codex_extension_api::ExtensionData,
+            _thread_store: &'a codex_extension_api::ExtensionData,
+            _prompt: &'a str,
+        ) -> codex_extension_api::ExtensionFuture<'a, Option<ReviewDecision>> {
+            Box::pin(async move { Some(ReviewDecision::Approved) })
+        }
+    }
+
+    let server = start_mock_server().await;
+    let denial = serde_json::json!({
+        "risk_level": "high",
+        "user_authorization": "unknown",
+        "outcome": "deny",
+        "rationale": "The original attempt was blocked by the sandbox.",
+    })
+    .to_string();
+    let request_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-escalated-retry"),
+            ev_assistant_message("msg-escalated-retry", &denial),
+            ev_completed("resp-escalated-retry"),
+        ]),
+    )
+    .await;
+
+    let (mut session, turn) = guardian_test_session_and_turn(&server).await;
+    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::<Config>::new();
+    extensions.approval_review_contributor(Arc::new(AutoApprovingReviewContributor));
+    Arc::get_mut(&mut session)
+        .expect("session should be uniquely owned")
+        .services
+        .extensions = Arc::new(extensions.build());
+    seed_guardian_parent_history(&session, &turn).await;
+
+    let retry_reason = "The sandbox blocked the original command.";
+    let decision = review_approval_request(
+        &session,
+        &turn,
+        "review-escalated-retry".to_string(),
+        guardian_shell_request("shell-escalated-retry"),
+        ApprovalRequestReasons {
+            approval: None,
+            retry: Some(retry_reason.to_string()),
+        },
+    )
+    .await;
+
+    assert!(matches!(decision, ReviewDecision::Denied { .. }));
+    assert!(
+        request_log
+            .single_request()
+            .body_contains_text(retry_reason)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
@@ -3445,7 +3511,7 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
 }
 
 #[tokio::test]
-async fn guardian_review_session_config_disables_mcp_apps_plugins_and_memories() {
+async fn guardian_review_session_config_disables_mcp_apps_plugins_memories_and_guardian_v2() {
     let mut parent_config = test_config().await;
     let server: McpServerConfig =
         toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
@@ -3461,6 +3527,10 @@ async fn guardian_review_session_config_disables_mcp_apps_plugins_and_memories()
         .features
         .enable(Feature::Plugins)
         .expect("plugins feature is configurable");
+    parent_config
+        .features
+        .enable(Feature::GuardianV2)
+        .expect("guardian v2 feature is configurable");
     parent_config.include_apps_instructions = true;
     parent_config.memories.use_memories = true;
     parent_config.memories.dedicated_tools = true;
@@ -3477,6 +3547,7 @@ async fn guardian_review_session_config_disables_mcp_apps_plugins_and_memories()
     assert!(guardian_config.mcp_servers.get().is_empty());
     assert!(!guardian_config.features.enabled(Feature::Apps));
     assert!(!guardian_config.features.enabled(Feature::Plugins));
+    assert!(!guardian_config.features.enabled(Feature::GuardianV2));
     assert!(!guardian_config.include_apps_instructions);
     assert!(!guardian_config.memories.use_memories);
     assert!(!guardian_config.memories.dedicated_tools);

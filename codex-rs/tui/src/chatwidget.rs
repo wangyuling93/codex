@@ -337,6 +337,7 @@ use crate::tui::FrameRequester;
 mod command_lifecycle;
 mod connectors;
 mod constructor;
+pub(crate) use self::connectors::ConnectorScopeGeneration;
 use self::connectors::ConnectorsState;
 mod exec_state;
 use self::exec_state::RunningCommand;

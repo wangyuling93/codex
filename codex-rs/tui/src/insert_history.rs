@@ -491,7 +491,7 @@ where
             bg = next_bg;
         }
 
-        queue!(writer, Print(span.content.clone()))?;
+        queue!(writer, Print(&span.content))?;
     }
 
     queue!(

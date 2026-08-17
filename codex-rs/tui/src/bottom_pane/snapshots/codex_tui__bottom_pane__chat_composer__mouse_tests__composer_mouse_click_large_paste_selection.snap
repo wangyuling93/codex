@@ -4,8 +4,8 @@ expression: "format!(\"selection: {:?}\\nmodifiers: {selection_modifiers:?}\\ncu
 ---
 selection: Some(0..27)
 modifiers: [BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED]
-cursor: Some((2, 1))
-"                                                            "
-"› [Pasted Content 1012 chars]                               "
-"                                                            "
+cursor: Some((4, 1))
+"╭──────────────────────────────────────────────────────────╮"
+"│ › [Pasted Content 1012 chars]                            │"
+"╰──────────────────────────────────────────────────────────╯"
 "                                         100% context left  "

@@ -4,8 +4,8 @@ expression: "format!(\"selection: {:?}\\nmodifiers: {selection_modifiers:?}\\ncu
 ---
 selection: Some(2..4)
 modifiers: [NONE, NONE, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED]
-cursor: Some((6, 1))
-"                              "
-"› a bc                        "
-"                              "
+cursor: Some((8, 1))
+"╭────────────────────────────╮"
+"│ › a bc                     │"
+"╰────────────────────────────╯"
 "           100% context left  "

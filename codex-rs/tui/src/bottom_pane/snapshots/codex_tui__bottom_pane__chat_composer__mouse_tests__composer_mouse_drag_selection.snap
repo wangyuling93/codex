@@ -4,8 +4,8 @@ expression: "format!(\"selection: {:?}\\nmodifiers: {selection_modifiers:?}\\ncu
 ---
 selection: Some(5..11)
 modifiers: [NONE, NONE, NONE, NONE, NONE, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED, BOLD | UNDERLINED | REVERSED]
-cursor: Some((13, 1))
-"                              "
-"› hello world                 "
-"                              "
+cursor: Some((15, 1))
+"╭────────────────────────────╮"
+"│ › hello world              │"
+"╰────────────────────────────╯"
 "           100% context left  "

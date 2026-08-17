@@ -1758,7 +1758,7 @@ async fn vim_normal_queued_message_edit_uses_remapped_history_up() {
             .map(|line| line.trim_matches('"').trim())
             .collect::<Vec<_>>()
             .join("\n"),
-        @"› queued message"
+        @"│ › queued message                                                             │"
     );
 }
 

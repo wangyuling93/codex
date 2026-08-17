@@ -207,7 +207,6 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use ratatui::widgets::Block;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::Widget;
@@ -272,7 +271,6 @@ use crate::keymap::RuntimeKeymap;
 use crate::keymap::VimNormalKeymap;
 use crate::keymap::user_bindings;
 use crate::onboarding::mark_underlined_hyperlink;
-use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
@@ -286,6 +284,7 @@ mod attachment_state;
 mod completion_target;
 mod draft_state;
 mod footer_state;
+mod frame;
 mod history_search;
 mod mouse;
 pub(crate) use self::mouse::ComposerMouseOutcome;
@@ -994,14 +993,12 @@ impl ChatComposer {
             }
             ActivePopup::None => Constraint::Max(footer_total_height),
         };
-        let [composer_rect, popup_rect] =
+        let [mut composer_rect, popup_rect] =
             Layout::vertical([Constraint::Min(3), popup_constraint]).areas(area);
-        let mut textarea_rect = composer_rect.inset(Insets::tlbr(
-            /*top*/ 1,
-            LIVE_PREFIX_COLS,
-            /*bottom*/ 1,
-            /*right*/ 1u16.saturating_add(textarea_right_reserve),
-        ));
+        // Keep the outline out of the reserved band (ambient pet). Footer and
+        // popups stay full width, matching the original reserve contract.
+        composer_rect.width = composer_rect.width.saturating_sub(textarea_right_reserve);
+        let mut textarea_rect = composer_rect.inset(frame::content_insets());
         let remote_images_height = self
             .attachments
             .remote_image_lines()
@@ -4505,9 +4502,7 @@ impl ChatComposer {
             .unwrap_or_else(|| footer_height(&footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
-        const COLS_WITH_MARGIN: u16 = LIVE_PREFIX_COLS + 1;
-        let inner_width =
-            width.saturating_sub(COLS_WITH_MARGIN.saturating_add(textarea_right_reserve));
+        let inner_width = frame::inner_width(width, textarea_right_reserve);
         let remote_images_height: u16 = self
             .attachments
             .remote_image_lines()
@@ -4518,7 +4513,7 @@ impl ChatComposer {
         self.draft.textarea.desired_height(inner_width)
             + remote_images_height
             + remote_images_separator
-            + 2
+            + frame::vertical_chrome()
             + match &self.popups.active {
                 ActivePopup::None => footer_total_height,
                 ActivePopup::Command(c) => c.calculate_required_height(width),
@@ -4817,7 +4812,7 @@ impl ChatComposer {
             }
         }
         let style = user_message_style();
-        Block::default().style(style).render(composer_rect, buf);
+        frame::render(composer_rect, buf, style);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.attachments.remote_image_lines())
                 .style(style)
@@ -5094,14 +5089,13 @@ mod tests {
 
         assert!(
             hint_row_idx > 0,
-            "expected a spacing row above the footer hints",
+            "expected the composer outline above the footer hints",
         );
 
-        let spacing_row = row_to_string(hint_row_idx - 1);
-        assert_eq!(
-            spacing_row.trim(),
-            "",
-            "expected blank spacing row above hints but saw: {spacing_row:?}",
+        let outline_row = row_to_string(hint_row_idx - 1);
+        assert!(
+            outline_row.contains('╰') && outline_row.contains('╯'),
+            "expected composer outline above hints but saw: {outline_row:?}",
         );
     }
 
@@ -5395,11 +5389,11 @@ mod tests {
 
         composer.set_text_content("!git".to_string(), Vec::new(), Vec::new());
         composer.move_cursor_to_end();
-        assert_eq!(composer.cursor_pos(area), Some((5, 1)));
+        assert_eq!(composer.cursor_pos(area), Some((7, 1)));
 
         composer.set_text_content("! git".to_string(), Vec::new(), Vec::new());
         composer.move_cursor_to_end();
-        assert_eq!(composer.cursor_pos(area), Some((6, 1)));
+        assert_eq!(composer.cursor_pos(area), Some((8, 1)));
     }
 
     #[test]
@@ -5423,7 +5417,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         composer.render(area, &mut buf);
 
-        let prompt_cell = &buf[(0, 1)];
+        let prompt_cell = &buf[(frame::FRAME + frame::PAD, 1)];
         assert_eq!(prompt_cell.symbol(), "!");
         assert_eq!(prompt_cell.style().fg, Some(Color::LightRed));
 

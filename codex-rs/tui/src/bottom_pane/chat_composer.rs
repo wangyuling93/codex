@@ -44,6 +44,11 @@
 //! - Persistent cross-session history (text-only; no element ranges or attachments).
 //! - Local in-session history (full text + text elements + local/remote image attachments).
 //!
+//! Before composer history handles Vim-normal history-up, `ChatWidget` restores the latest queued
+//! follow-up when the composer is empty and no popup is active. It removes the message from the
+//! queue before placing it in the composer, so editing and requeuing it replaces the prior
+//! revision instead of creating duplicates.
+//!
 //! When recalling a local entry, the composer rehydrates text elements and both attachment kinds
 //! (local image paths + remote image URLs).
 //! When recalling a persistent entry, only the text is restored.
@@ -326,6 +331,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -523,7 +529,7 @@ pub(crate) struct ChatComposer {
     toggle_shortcuts_keys: Vec<KeyBinding>,
     history_search_previous_keys: Vec<KeyBinding>,
     history_search_next_keys: Vec<KeyBinding>,
-    editor_keymap: EditorKeymap,
+    editor_keymap: Arc<EditorKeymap>,
     vim_normal_keymap: VimNormalKeymap,
     last_textarea_area: Cell<Option<Rect>>,
     mouse_drag_active: bool,
@@ -719,6 +725,7 @@ impl ChatComposer {
             last_textarea_area: Cell::new(None),
             mouse_drag_active: false,
         };
+        this.draft.textarea.set_keymap_bindings(&default_keymap);
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
         this
@@ -11253,8 +11260,10 @@ mod tests {
         assert!(matches!(result, InputResult::Submitted { .. }));
 
         let mut keymap = RuntimeKeymap::defaults();
-        keymap.editor.move_up = vec![key_hint::plain(KeyCode::F(2))];
+        Arc::make_mut(&mut keymap.editor).move_up = vec![key_hint::plain(KeyCode::F(2))];
         composer.set_keymap_bindings(&keymap);
+        assert!(Arc::ptr_eq(&composer.editor_keymap, &keymap.editor));
+        assert_eq!(Arc::strong_count(&keymap.editor), 3);
 
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert!(composer.draft.textarea.is_empty());

@@ -8,6 +8,7 @@ use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
 use crate::current_time::app_server_time_provider;
+use crate::error_code::invalid_params;
 use crate::error_code::invalid_request;
 use crate::extensions::ThreadExtensionDependencies;
 use crate::extensions::app_server_extension_event_sink;
@@ -34,6 +35,7 @@ use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
+use crate::request_processors::ProjectRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
@@ -97,8 +99,34 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
 
 fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
+    reject_obsolete_request_fields(&request)?;
+
     ClientRequest::try_from(request)
         .map_err(|err| invalid_request(format!("Invalid request: {err}")))
+}
+
+fn reject_obsolete_request_fields(request: &JSONRPCRequest) -> Result<(), JSONRPCErrorError> {
+    reject_removed_permission_profile(request)?;
+    Ok(())
+}
+
+fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSONRPCErrorError> {
+    if matches!(
+        request.method.as_str(),
+        "thread/start" | "thread/resume" | "thread/fork" | "turn/start"
+    ) && request
+        .params
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|params| params.contains_key("permissionProfile"))
+    {
+        let method = request.method.as_str();
+        return Err(invalid_params(format!(
+            "`permissionProfile` is no longer supported for `{method}`; use `permissions` with a named profile id instead"
+        )));
+    }
+
+    Ok(())
 }
 
 pub(crate) struct MessageProcessor {
@@ -120,6 +148,7 @@ pub(crate) struct MessageProcessor {
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
     plugin_processor: PluginRequestProcessor,
+    project_processor: ProjectRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
     thread_goal_processor: ThreadGoalRequestProcessor,
@@ -448,6 +477,11 @@ impl MessageProcessor {
             outgoing.clone(),
             queue_service,
         );
+        let project_processor = ProjectRequestProcessor::new(
+            Arc::clone(&thread_store),
+            outgoing.clone(),
+            Arc::clone(&thread_list_state_permit),
+        );
         let thread_processor = ThreadRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -535,6 +569,7 @@ impl MessageProcessor {
             marketplace_processor,
             mcp_processor,
             plugin_processor,
+            project_processor,
             remote_control_processor,
             search_processor,
             thread_goal_processor,
@@ -1240,6 +1275,27 @@ impl MessageProcessor {
             }
             ClientRequest::ThreadList { params, .. } => {
                 self.thread_processor.thread_list(params).await
+            }
+            ClientRequest::ProjectList { params, .. } => {
+                self.project_processor.project_list(params).await
+            }
+            ClientRequest::ProjectRead { params, .. } => {
+                self.project_processor.project_read(params).await
+            }
+            ClientRequest::ProjectCreate { params, .. } => {
+                self.project_processor.project_create(params).await
+            }
+            ClientRequest::ProjectImport { params, .. } => {
+                self.project_processor.project_import(params).await
+            }
+            ClientRequest::ProjectUpdate { params, .. } => {
+                self.project_processor.project_update(params).await
+            }
+            ClientRequest::ProjectMove { params, .. } => {
+                self.project_processor.project_move(params).await
+            }
+            ClientRequest::ProjectDelete { params, .. } => {
+                self.project_processor.project_delete(params).await
             }
             ClientRequest::ThreadSearch { params, .. } => {
                 self.thread_processor.thread_search(params).await

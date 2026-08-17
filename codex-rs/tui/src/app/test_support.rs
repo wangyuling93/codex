@@ -28,6 +28,7 @@ pub(super) async fn make_test_app_with_event_receiver()
         chat_widget,
         workspace_command_runner: None,
         launch_cwd: config.cwd.to_path_buf(),
+        runtime_working_directory_override: None,
         config,
         state_db: None,
         cli_kv_overrides: Vec::new(),

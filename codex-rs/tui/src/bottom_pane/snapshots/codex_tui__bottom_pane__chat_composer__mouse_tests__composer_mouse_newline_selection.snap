@@ -4,9 +4,9 @@ expression: "format!(\"selection: {:?}\\nmodifiers: {selection_modifiers:?}\\ncu
 ---
 selection: Some(3..4)
 modifiers: [NONE, NONE, NONE, BOLD | UNDERLINED | REVERSED]
-cursor: Some((5, 1))
-"                              "
-"› abc                         "
-"  def                         "
-"                              "
+cursor: Some((7, 1))
+"╭────────────────────────────╮"
+"│ › abc                      │"
+"│   def                      │"
+"╰────────────────────────────╯"
 "           100% context left  "

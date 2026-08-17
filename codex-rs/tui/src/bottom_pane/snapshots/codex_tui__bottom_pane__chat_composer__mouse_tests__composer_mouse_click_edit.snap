@@ -2,8 +2,8 @@
 source: tui/src/bottom_pane/chat_composer/mouse_tests.rs
 expression: "format!(\"cursor: {:?}\\n{}\", composer.cursor_pos(area), terminal.backend())"
 ---
-cursor: Some((9, 1))
-"                              "
-"› hello, orld                 "
-"                              "
+cursor: Some((11, 1))
+"╭────────────────────────────╮"
+"│ › hello, orld              │"
+"╰────────────────────────────╯"
 "           100% context left  "

@@ -320,7 +320,10 @@ impl ChatWidget {
             SlashCommand::Side | SlashCommand::Btw => {
                 self.request_empty_side_conversation(cmd);
             }
-            SlashCommand::Agent | SlashCommand::MultiAgents => {
+            SlashCommand::Agents => {
+                self.app_event_tx.send(AppEvent::OpenAgentsOverview);
+            }
+            SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
             SlashCommand::Permissions => {
@@ -1155,7 +1158,7 @@ impl ChatWidget {
             | SlashCommand::Btw
             | SlashCommand::Keymap
             | SlashCommand::Transparent
-            | SlashCommand::Agent
+            | SlashCommand::Agents
             | SlashCommand::MultiAgents
             | SlashCommand::Permissions
             | SlashCommand::ElevateSandbox

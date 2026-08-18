@@ -812,7 +812,7 @@ client_request_definitions! {
     },
     HooksList => "hooks/list" {
         params: v2::HooksListParams,
-        serialization: global("config"),
+        serialization: global_shared_read("config"),
         response: v2::HooksListResponse,
     },
     MarketplaceAdd => "marketplace/add" {
@@ -1310,7 +1310,7 @@ client_request_definitions! {
 
     ConfigRequirementsRead => "configRequirements/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: global("config"),
+        serialization: global_shared_read("config"),
         response: v2::ConfigRequirementsReadResponse,
     },
 
@@ -1824,6 +1824,8 @@ server_notification_definitions! {
     ItemStarted => "item/started" (v2::ItemStartedNotification),
     ItemGuardianApprovalReviewStarted => "item/autoApprovalReview/started" (v2::ItemGuardianApprovalReviewStartedNotification),
     ItemGuardianApprovalReviewCompleted => "item/autoApprovalReview/completed" (v2::ItemGuardianApprovalReviewCompletedNotification),
+    #[experimental("autoApprovalReview/strictReviewRequired")]
+    StrictReviewRequired => "autoApprovalReview/strictReviewRequired" (v2::StrictReviewRequiredNotification),
     ItemCompleted => "item/completed" (v2::ItemCompletedNotification),
     /// This event is internal-only. Used by Codex Cloud.
     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
@@ -2245,6 +2247,15 @@ mod tests {
             Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
         );
 
+        let hooks_list = ClientRequest::HooksList {
+            request_id: request_id(),
+            params: v2::HooksListParams { cwds: Vec::new() },
+        };
+        assert_eq!(
+            hooks_list.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
+        );
+
         let skills_extra_roots_set = ClientRequest::SkillsExtraRootsSet {
             request_id: request_id(),
             params: v2::SkillsExtraRootsSetParams {
@@ -2337,6 +2348,15 @@ mod tests {
         };
         assert_eq!(
             config_read.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
+        );
+
+        let config_requirements_read = ClientRequest::ConfigRequirementsRead {
+            request_id: request_id(),
+            params: None,
+        };
+        assert_eq!(
+            config_requirements_read.serialization_scope(),
             Some(ClientRequestSerializationScope::GlobalSharedRead("config"))
         );
 

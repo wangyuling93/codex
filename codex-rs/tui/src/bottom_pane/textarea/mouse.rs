@@ -73,7 +73,7 @@ impl TextArea {
         position: Position,
     ) -> Option<(usize, usize)> {
         let lines = self.wrapped_lines(area.width);
-        let scroll = self.effective_scroll(area.height, &lines, state.scroll);
+        let scroll = self.effective_scroll(area, &lines, state.scroll);
         let visible_row = position.y.saturating_sub(area.y);
         let line = lines.get(usize::from(scroll.saturating_add(visible_row)))?;
         let line_end = line.end.saturating_sub(1).min(self.text.len());

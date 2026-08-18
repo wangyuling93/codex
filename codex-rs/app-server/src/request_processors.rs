@@ -324,7 +324,6 @@ use codex_backend_client::RateLimitResetCreditsDetails as BackendRateLimitResetC
 use codex_backend_client::RequestError as BackendRequestError;
 use codex_backend_client::TokenUsageProfile;
 use codex_chatgpt::connectors;
-use codex_chatgpt::workspace_settings;
 use codex_config::CloudConfigBundleLoadError;
 use codex_config::CloudConfigBundleLoadErrorCode;
 use codex_config::ConfigLayerStack;
@@ -545,6 +544,7 @@ mod git_processor;
 mod initialize_processor;
 mod marketplace_processor;
 mod mcp_processor;
+mod persisted_resume_settings;
 mod plugins;
 mod process_exec_processor;
 mod projects;

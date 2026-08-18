@@ -40,7 +40,7 @@ pub enum SlashCommand {
     Compact,
     Plan,
     Goal,
-    Agent,
+    Agents,
     Side,
     Btw,
     Copy,
@@ -129,7 +129,8 @@ impl SlashCommand {
             SlashCommand::Personality => "choose a communication style for Codex",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
-            SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
+            SlashCommand::Agents => "view and switch between all active agent sessions",
+            SlashCommand::MultiAgents => "switch between this session's subagents",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
             }
@@ -191,6 +192,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Copy
+                | SlashCommand::Agents
                 | SlashCommand::Export
                 | SlashCommand::Raw
                 | SlashCommand::Transparent
@@ -261,7 +263,7 @@ impl SlashCommand {
             | SlashCommand::Btw => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
-            SlashCommand::Agent | SlashCommand::MultiAgents => true,
+            SlashCommand::Agents | SlashCommand::MultiAgents => true,
             SlashCommand::Theme | SlashCommand::Pets => false,
         }
     }

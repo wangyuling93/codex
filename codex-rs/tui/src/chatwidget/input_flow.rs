@@ -110,6 +110,9 @@ impl ChatWidget {
         action: QueuedInputAction,
         pending_pastes: Vec<(String, String)>,
     ) {
+        if self.misalignment_policy_violation {
+            return;
+        }
         let should_run_now = self.is_session_configured()
             && !self.is_user_turn_pending_or_running()
             && !self.input_queue.suppress_queue_autosend;
@@ -135,7 +138,7 @@ impl ChatWidget {
 
     /// If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) -> bool {
-        if self.input_queue.suppress_queue_autosend {
+        if self.misalignment_policy_violation || self.input_queue.suppress_queue_autosend {
             return false;
         }
         if self.blocks_direct_input {

@@ -44,7 +44,7 @@ impl ChatWidget {
             return;
         }
 
-        if self.handle_reasoning_shortcut(key_event) {
+        if self.handle_reasoning_shortcut(key_event) || self.handle_permission_shortcut(key_event) {
             self.bottom_pane.clear_quit_shortcut_hint();
             self.quit_shortcut_expires_at = None;
             self.quit_shortcut_key = None;
@@ -365,8 +365,7 @@ impl ChatWidget {
                 tx.set_thread_name(name);
             }),
         );
-
-        self.bottom_pane.show_view(Box::new(view));
+        self.bottom_pane.show_text_prompt(view);
     }
 
     pub(super) fn ensure_thread_rename_allowed(&mut self) -> bool {

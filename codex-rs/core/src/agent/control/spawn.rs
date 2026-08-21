@@ -4,6 +4,8 @@ use crate::agent::role::apply_role_to_config;
 use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
+use crate::context::ManagedDeveloperInstructions;
+use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
 use crate::session::multi_agents::resolve_usage_hints;
 use codex_extension_api::ExtensionDataInit;
@@ -57,13 +59,16 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
                 "assistant" => *phase == Some(MessagePhase::FinalAnswer),
                 _ => false,
             },
+            ResponseItem::FunctionCallOutput { call_id: None, .. } => true,
             ResponseItem::AdditionalTools { .. }
             | ResponseItem::AgentMessage { .. }
             | ResponseItem::Reasoning { .. }
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::FunctionCall { .. }
             | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::FunctionCallOutput { .. }
+            | ResponseItem::FunctionCallOutput {
+                call_id: Some(_), ..
+            }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::CustomToolCallOutput { .. }
             | ResponseItem::ToolSearchOutput { .. }
@@ -85,22 +90,27 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
     }
 }
 
-fn is_fork_excluded_developer_message(item: &ResponseItem, usage_hint_texts: &[String]) -> bool {
+fn retain_forked_developer_message(item: &mut ResponseItem, usage_hint_texts: &[String]) -> bool {
     let ResponseItem::Message { role, content, .. } = item else {
-        return false;
+        return true;
     };
     if role != "developer" {
-        return false;
+        return true;
     }
-    let [ContentItem::InputText { text }] = content.as_slice() else {
-        return false;
-    };
 
-    MultiAgentRoleInstructions::matches_text(text)
-        || CurrentTimeReminder::matches_text(text)
-        || usage_hint_texts
-            .iter()
-            .any(|usage_hint_text| usage_hint_text == text)
+    content.retain(|content_item| {
+        let ContentItem::InputText { text } = content_item else {
+            return true;
+        };
+
+        !(MultiAgentRoleInstructions::matches_text(text)
+            || MultiAgentModeInstructions::matches_text(text)
+            || CurrentTimeReminder::matches_text(text)
+            || usage_hint_texts
+                .iter()
+                .any(|usage_hint_text| usage_hint_text == text))
+    });
+    !content.is_empty()
 }
 
 async fn load_agent_model_context(
@@ -724,21 +734,33 @@ impl AgentControl {
             if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                 return false;
             }
-            if is_fork_excluded_developer_message(
+            if !retain_forked_developer_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,
             ) {
                 return false;
             }
 
-            if let Some(parent_developer_instructions) = parent_developer_instructions.as_ref()
-                && let Some(subagent_developer_instructions) =
-                    subagent_developer_instructions.as_ref()
-                && let ResponseItem::Message { role, content, .. } = response_item
+            if let ResponseItem::Message { role, content, .. } = response_item
                 && role == "developer"
             {
                 content.retain_mut(|content_item| {
                     let ContentItem::InputText { text } = content_item else {
+                        return true;
+                    };
+                    if ManagedDeveloperInstructions::matches_text(text) {
+                        // If the child will rebuild its initial context, drop the inherited
+                        // managed instructions; startup will add the current requirements once.
+                        return preserve_reference_context_item;
+                    }
+                    let (
+                        Some(parent_developer_instructions),
+                        Some(subagent_developer_instructions),
+                    ) = (
+                        parent_developer_instructions.as_ref(),
+                        subagent_developer_instructions.as_ref(),
+                    )
+                    else {
                         return true;
                     };
                     // TODO(anp) track better message fragment provenance in rollouts.

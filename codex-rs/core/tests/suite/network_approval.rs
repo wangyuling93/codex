@@ -1956,7 +1956,10 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
     test.fs()
         .create_directory(
             &remote_cwd_uri,
-            CreateDirectoryOptions { recursive: true },
+            CreateDirectoryOptions {
+                recursive: true,
+                follow_symlinks: true,
+            },
             /*sandbox*/ None,
         )
         .await?;
@@ -2031,6 +2034,7 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
             RemoveOptions {
                 recursive: true,
                 force: true,
+                follow_symlinks: true,
             },
             /*sandbox*/ None,
         )
@@ -2074,11 +2078,6 @@ allow_local_binding = true
         .with_home(home)
         .with_cloud_config_bundle(managed_network_requirements_loader())
         .with_config(move |config| {
-            config.use_experimental_unified_exec_tool = true;
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
             for feature in &features {
                 config
                     .features

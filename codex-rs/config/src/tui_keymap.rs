@@ -129,6 +129,10 @@ pub struct TuiChatKeymap {
     pub decrease_reasoning_effort: Option<KeybindingsSpec>,
     /// Increase the active reasoning effort.
     pub increase_reasoning_effort: Option<KeybindingsSpec>,
+    /// Switch to the previous available permission mode.
+    pub previous_permission_mode: Option<KeybindingsSpec>,
+    /// Switch to the next available permission mode.
+    pub next_permission_mode: Option<KeybindingsSpec>,
     /// Edit the most recently queued message.
     pub edit_queued_message: Option<KeybindingsSpec>,
 }
@@ -231,6 +235,8 @@ pub struct TuiVimNormalKeymap {
     pub move_line_end: Option<KeybindingsSpec>,
     /// Delete character under cursor (`x`).
     pub delete_char: Option<KeybindingsSpec>,
+    /// Replace the character under the cursor (`r`).
+    pub replace_char: Option<KeybindingsSpec>,
     /// Delete character under cursor and enter insert mode (`s`).
     pub substitute_char: Option<KeybindingsSpec>,
     /// Delete from cursor to end of line (`D`).

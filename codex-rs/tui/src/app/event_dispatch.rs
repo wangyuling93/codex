@@ -1522,6 +1522,9 @@ impl App {
                     profile_selection,
                 );
             }
+            AppEvent::ApplyPermissionShortcut { thread_id, selection } => {
+                self.apply_permission_shortcut(app_server, tui, thread_id, selection).await;
+            }
             AppEvent::OpenWorldWritableWarningConfirmation {
                 preset,
                 profile_selection,

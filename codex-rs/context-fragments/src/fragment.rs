@@ -1,7 +1,6 @@
 use crate::AnnotatedContent;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
-use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 
 /// A rendered contextual fragment and the role that owns its annotated content.
@@ -12,6 +11,11 @@ pub struct RenderedFragment {
 }
 
 impl RenderedFragment {
+    /// Creates a rendered fragment without separating its role and annotated content.
+    pub fn new(role: &'static str, content: AnnotatedContent) -> Self {
+        Self { role, content }
+    }
+
     /// Returns the response role associated with this fragment.
     pub fn role(&self) -> &'static str {
         self.role
@@ -25,6 +29,26 @@ impl RenderedFragment {
     /// Separates the role and annotated content at an API boundary.
     pub fn into_parts(self) -> (&'static str, AnnotatedContent) {
         (self.role, self.content)
+    }
+}
+
+impl From<RenderedFragment> for ResponseItem {
+    fn from(fragment: RenderedFragment) -> Self {
+        let (role, annotated_content) = fragment.into_parts();
+        let (content, content_kind) = annotated_content.into_parts();
+
+        Self::Message {
+            id: None,
+            role: role.to_string(),
+            content: vec![content],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![content_kind]),
+                    ..Default::default()
+                },
+            ),
+        }
     }
 }
 
@@ -76,50 +100,21 @@ pub trait ContextualUserFragment {
 
     /// Renders the role, model-visible content, and classification together.
     fn render_fragment(&self) -> RenderedFragment {
-        RenderedFragment {
-            role: self.role(),
-            content: AnnotatedContent::input_text(self.render(), self.content_kind()),
-        }
+        RenderedFragment::new(
+            self.role(),
+            AnnotatedContent::input_text(self.render(), self.content_kind()),
+        )
     }
 
     fn into(self) -> ResponseItem
     where
         Self: Sized,
     {
-        ResponseItem::Message {
-            id: None,
-            role: self.role().to_string(),
-            content: vec![ContentItem::InputText {
-                text: self.render(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }
+        ResponseItem::from(self.render_fragment())
     }
 
     fn into_boxed_response_item(self: Box<Self>) -> ResponseItem {
-        ResponseItem::Message {
-            id: None,
-            role: self.role().to_string(),
-            content: vec![ContentItem::InputText {
-                text: self.render(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }
-    }
-
-    fn into_response_input_item(self) -> ResponseInputItem
-    where
-        Self: Sized,
-    {
-        ResponseInputItem::Message {
-            role: self.role().to_string(),
-            content: vec![ContentItem::InputText {
-                text: self.render(),
-            }],
-            phase: None,
-        }
+        ResponseItem::from(self.render_fragment())
     }
 }
 

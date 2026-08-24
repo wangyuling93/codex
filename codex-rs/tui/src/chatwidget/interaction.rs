@@ -161,14 +161,6 @@ impl ChatWidget {
             return;
         }
 
-        if matches!(key_event.code, KeyCode::Esc)
-            && key_event.kind == KeyEventKind::Press
-            && self.should_show_plan_mode_nudge()
-        {
-            self.dismiss_plan_mode_nudge();
-            return;
-        }
-
         if self.handle_plugins_popup_key_event(key_event) {
             return;
         }
@@ -186,7 +178,6 @@ impl ChatWidget {
                     self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
                 } else {
                     self.cycle_collaboration_mode();
-                    self.refresh_plan_mode_nudge();
                 }
             }
             _ => {
@@ -228,7 +219,6 @@ impl ChatWidget {
 
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.bottom_pane.apply_external_edit(text);
-        self.refresh_plan_mode_nudge();
         self.request_redraw();
     }
 
@@ -246,13 +236,11 @@ impl ChatWidget {
 
     pub(crate) fn show_selection_view(&mut self, params: SelectionViewParams) {
         self.bottom_pane.show_selection_view(params);
-        self.refresh_plan_mode_nudge();
         self.request_redraw();
     }
 
     pub(crate) fn show_bottom_pane_view(&mut self, view: Box<dyn BottomPaneView>) {
         self.bottom_pane.show_view(view);
-        self.refresh_plan_mode_nudge();
         self.request_redraw();
     }
 
@@ -262,7 +250,6 @@ impl ChatWidget {
         view: Box<dyn BottomPaneView>,
     ) {
         self.bottom_pane.replace_view_if_present(view_id, view);
-        self.refresh_plan_mode_nudge();
     }
 
     pub(crate) fn selected_index_for_present_view(&self, view_id: &'static str) -> Option<usize> {
@@ -274,13 +261,8 @@ impl ChatWidget {
         view_id: &'static str,
         params: SelectionViewParams,
     ) -> bool {
-        let replaced = self
-            .bottom_pane
-            .replace_selection_view_if_present(view_id, params);
-        if replaced {
-            self.refresh_plan_mode_nudge();
-        }
-        replaced
+        self.bottom_pane
+            .replace_selection_view_if_present(view_id, params)
     }
 
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
@@ -473,13 +455,11 @@ impl ChatWidget {
 
     pub(crate) fn handle_paste(&mut self, text: String) {
         self.bottom_pane.handle_paste(text);
-        self.refresh_plan_mode_nudge();
     }
 
     // Returns true if caller should skip rendering this frame (a future frame is scheduled).
     pub(crate) fn handle_paste_burst_tick(&mut self, frame_requester: FrameRequester) -> bool {
         if self.bottom_pane.flush_paste_burst_if_due() {
-            self.refresh_plan_mode_nudge();
             // A paste just flushed; request an immediate redraw and skip this frame.
             self.request_redraw();
             true

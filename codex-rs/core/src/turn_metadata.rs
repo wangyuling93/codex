@@ -108,11 +108,14 @@ pub(crate) struct TurnMetadataState {
     forked_from_thread_id: Option<ThreadId>,
     parent_thread_id: Option<ThreadId>,
     parent_turn_id: OnceLock<String>,
+    initiating_agent_path: OnceLock<AgentPath>,
     root_turn_id: OnceLock<String>,
     subagent_header: Option<String>,
     subagent_kind: Option<String>,
     thread_source: Option<ThreadSource>,
     turn_id: String,
+    // TODO(anp): Derive this cached tag from TurnEnvironment::sandbox_context
+    // so metadata reflects the selected environment's backend.
     sandbox: Option<String>,
     sandbox_mode: Option<String>,
     auto_review_enabled: bool,
@@ -127,6 +130,12 @@ pub(crate) struct TurnMetadataState {
     user_input_requested_during_turn: AtomicBool,
     enrichment_task: Mutex<Option<JoinHandle<()>>>,
     git_enrichment_complete: watch::Sender<bool>,
+}
+
+impl codex_analytics::TurnAnalyticsMetadata for TurnMetadataState {
+    fn root_turn_id(&self) -> Option<String> {
+        TurnMetadataState::root_turn_id(self)
+    }
 }
 
 impl TurnMetadataState {
@@ -170,6 +179,7 @@ impl TurnMetadataState {
             forked_from_thread_id,
             parent_thread_id,
             parent_turn_id: OnceLock::new(),
+            initiating_agent_path: OnceLock::new(),
             root_turn_id: OnceLock::new(),
             subagent_header: subagent_header_value(session_source),
             subagent_kind: subagent_metadata_kind(session_source),
@@ -266,6 +276,18 @@ impl TurnMetadataState {
             return;
         }
         let _ = self.parent_turn_id.set(parent_turn_id);
+    }
+
+    pub(crate) fn parent_turn_id(&self) -> Option<String> {
+        self.parent_turn_id.get().cloned()
+    }
+
+    pub(crate) fn set_initiating_agent_path(&self, initiating_agent_path: AgentPath) {
+        let _ = self.initiating_agent_path.set(initiating_agent_path);
+    }
+
+    pub(crate) fn initiating_agent_path(&self) -> Option<&AgentPath> {
+        self.initiating_agent_path.get()
     }
 
     pub(crate) fn set_root_turn_id(&self, root_turn_id: String) {

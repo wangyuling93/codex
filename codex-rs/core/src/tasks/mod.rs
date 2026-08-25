@@ -26,6 +26,7 @@ use tracing::warn;
 use crate::codex_thread::BackgroundTerminalInfo;
 use crate::config::Config;
 use crate::context::ContextualUserFragment;
+use crate::hook_runtime::run_turn_interrupt_hooks;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn::run_hooks_and_record_inputs;
@@ -314,6 +315,18 @@ impl Session {
             self.input_queue.get_pending_input(&self.active_turn).await;
         if let MailboxParentProvenance::Attribute = mailbox_parent_provenance {
             if let Some(id) = parent_turn_id {
+                if let Some(initiating_agent_path) = pending_items.iter().find_map(|item| {
+                    let TurnInput::InterAgentCommunication(communication) = item else {
+                        return None;
+                    };
+                    communication
+                        .trigger_turn
+                        .then(|| communication.author.clone())
+                }) {
+                    turn_context
+                        .turn_metadata_state
+                        .set_initiating_agent_path(initiating_agent_path);
+                }
                 turn_context.turn_metadata_state.set_parent_turn_id(id);
             }
             if let Some(id) = root_turn_id {
@@ -779,6 +792,9 @@ impl Session {
             ThreadIdleCause::Completed
         };
         let event = if let Some(reason) = abort_reason {
+            if reason == TurnAbortReason::Interrupted {
+                run_turn_interrupt_hooks(self, &turn_context).await;
+            }
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
             EventMsg::TurnAborted(TurnAbortedEvent {
@@ -927,6 +943,10 @@ impl Session {
             if let Err(err) = self.flush_rollout().await {
                 warn!("failed to flush interrupted-turn marker before emitting TurnAborted: {err}");
             }
+        }
+
+        if reason == TurnAbortReason::Interrupted {
+            run_turn_interrupt_hooks(self, &task.turn_context).await;
         }
 
         let started_at = task

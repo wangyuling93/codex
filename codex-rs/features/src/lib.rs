@@ -88,6 +88,8 @@ impl Stage {
 /// Unique features toggled via configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
+    /// Enable the interactive transcript composer and turn-selection UI.
+    TranscriptV2,
     // Stable.
     /// Enable the default shell tool.
     ShellTool,
@@ -99,6 +101,8 @@ pub enum Feature {
     SecretAuthStorage,
 
     // Experimental
+    /// Send per-content-entry classifications in internal Responses metadata.
+    ContentItemKinds,
     /// Record model-attempted tool calls in internal Responses metadata.
     ExecutedToolCallMetadata,
     /// Enable JavaScript code mode backed by the standalone host process.
@@ -219,6 +223,10 @@ pub enum Feature {
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
     InAppDictation,
+    /// Allow desktop apps to run local automations.
+    ///
+    /// Requirements-only gate: this should be set from requirements, not user config.
+    InAppLocalAutomation,
     /// Allow desktop apps to perform in-app updates.
     ///
     /// Requirements-only gate: this should be set from requirements, not user config.
@@ -828,6 +836,12 @@ pub struct FeatureSpec {
 }
 
 pub const FEATURES: &[FeatureSpec] = &[
+    FeatureSpec {
+        id: Feature::TranscriptV2,
+        key: "transcript_v2",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
     // Stable features.
     FeatureSpec {
         id: Feature::GhostCommit,
@@ -899,6 +913,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::JsRepl,
         key: "js_repl",
         stage: Stage::Removed,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ContentItemKinds,
+        key: "content_item_kinds",
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1250,6 +1270,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::InAppDictation,
         key: "in_app_dictation",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::InAppLocalAutomation,
+        key: "in_app_local_automation",
         stage: Stage::Stable,
         default_enabled: true,
     },

@@ -13,6 +13,8 @@
 //! Wrapping also reserves a visible insertion point: full logical lines get continuation rows,
 //! and trailing spaces wrap instead of moving the cursor outside the textarea. At soft word
 //! breaks, interior separators hang off the preceding row without changing the editable text.
+//! Visible web URLs carry their complete terminal hyperlink destination across wrapped rows;
+//! masked rendering never exposes hyperlink destinations.
 
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::is_altgr;
@@ -38,12 +40,14 @@ use ratatui::text::Span;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod hyperlinks;
 mod mouse;
 pub(crate) use self::mouse::MouseSelectionUpdate;
 mod selection;
@@ -156,6 +160,7 @@ pub(crate) struct TextArea {
 struct WrapCache {
     width: u16,
     lines: Vec<Range<usize>>,
+    hyperlinks: OnceCell<hyperlinks::HyperlinkCache>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -317,7 +322,7 @@ impl TextArea {
         }
         match self.vim_pending {
             VimPending::None => KeymapContext::VimNormal,
-            VimPending::Replace => KeymapContext::Editor,
+            VimPending::Replace | VimPending::Find { .. } => KeymapContext::Editor,
             VimPending::Operator(_) => KeymapContext::VimOperator,
             VimPending::TextObject { .. } => KeymapContext::VimTextObject,
         }
@@ -736,7 +741,7 @@ impl TextArea {
                 self.handle_vim_text_object(operator, scope, event);
                 return;
             }
-            VimPending::Replace => {
+            VimPending::Replace | VimPending::Find { .. } => {
                 self.handle_vim_pending_command(pending, event);
                 return;
             }
@@ -894,7 +899,7 @@ impl TextArea {
             self.start_vim_edit(VimAction::Change(VimEditTarget::Line));
             return true;
         }
-        false
+        self.handle_vim_operator_command(op, event)
     }
 
     fn handle_vim_text_object(
@@ -2050,7 +2055,11 @@ impl TextArea {
             if needs_recalc {
                 let display_text = text_for_display(&self.text);
                 let lines = wrapping::wrapped_lines(display_text.as_ref(), width);
-                *cache = Some(WrapCache { width, lines });
+                *cache = Some(WrapCache {
+                    width,
+                    lines,
+                    hyperlinks: OnceCell::new(),
+                });
             }
         }
 
@@ -2163,7 +2172,7 @@ impl TextArea {
         highlights: &[(Range<usize>, Style)],
     ) {
         let element_style = base_style.fg(Color::Cyan);
-        for (row, idx) in range.enumerate() {
+        for (row, idx) in range.clone().enumerate() {
             let r = &lines[idx];
             let y = area.y + row as u16;
             let visible = wrapping::visible_prefix(&self.text[r.start..r.end - 1], area.width);
@@ -2222,6 +2231,12 @@ impl TextArea {
                     buf.set_style(Rect::new(area.x + x_off, y, 1, 1), *style);
                 }
             }
+        }
+        if let Some(wrap_cache) = self.wrap_cache.borrow().as_ref() {
+            wrap_cache
+                .hyperlinks
+                .get_or_init(|| hyperlinks::HyperlinkCache::new(&self.text, lines))
+                .mark(buf, area, &self.text, lines, range);
         }
     }
 

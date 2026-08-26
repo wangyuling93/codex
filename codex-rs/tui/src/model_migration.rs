@@ -157,8 +157,8 @@ pub(crate) async fn run_model_migration_prompt(
             match event {
                 TuiEvent::Key(key_event) => screen.handle_key(key_event),
                 TuiEvent::Mouse(mouse_event) => screen.handle_mouse(mouse_event),
-                TuiEvent::Paste(_) => {}
-                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) => {
+                TuiEvent::Paste(_) | TuiEvent::FocusLost => {}
+                TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
                     let _ = alt.tui.draw(u16::MAX, |frame| {
                         frame.render_widget_ref(&screen, frame.area());
                     });

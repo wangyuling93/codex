@@ -440,7 +440,7 @@ impl App {
     fn overlay_forward_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         if matches!(
             &event,
-            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_)
+            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
         ) && matches!(self.overlay, Some(Overlay::Transcript(_)))
         {
             return self.draw_transcript_overlay(tui);

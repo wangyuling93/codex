@@ -741,7 +741,7 @@ impl UnifiedExecProcessManager {
             truncation_policy: context
                 .step_context
                 .turn
-                .model_info
+                .model_info()
                 .truncation_policy
                 .into(),
             max_output_tokens: request.max_output_tokens,
@@ -1269,7 +1269,7 @@ impl UnifiedExecProcessManager {
                     approval_policy: turn.approval_policy(),
                     permission_profile: request.turn_environment.permission_profile().clone(),
                     environment_policy: request.turn_environment.config().exec_policy.as_ref(),
-                    windows_sandbox_level: turn.windows_sandbox_level,
+                    windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
                     sandbox_permissions: if request.additional_permissions_preapproved {
                         crate::sandboxing::SandboxPermissions::UseDefault
                     } else {

@@ -25,6 +25,7 @@ use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
 use crate::sandbox_tags::permission_profile_policy_tag;
 use crate::sandbox_tags::permission_profile_sandbox_tag;
+use codex_git_utils::SanitizedGitUrl;
 use codex_git_utils::get_git_remote_urls_assume_git_repo;
 use codex_git_utils::get_git_repo_root;
 use codex_git_utils::get_has_changes_in_repo;
@@ -51,7 +52,7 @@ pub(crate) struct McpTurnMetadataContext<'a> {
 
 #[derive(Clone, Debug, Default)]
 struct WorkspaceGitMetadata {
-    associated_remote_urls: Option<BTreeMap<String, String>>,
+    associated_remote_urls: Option<BTreeMap<String, SanitizedGitUrl>>,
     latest_git_commit_hash: Option<String>,
     has_changes: Option<bool>,
 }
@@ -113,6 +114,7 @@ pub(crate) struct TurnMetadataState {
     subagent_header: Option<String>,
     subagent_kind: Option<String>,
     thread_source: Option<ThreadSource>,
+    turn_trigger: OnceLock<String>,
     turn_id: String,
     // TODO(anp): Derive this cached tag from TurnEnvironment::sandbox_context
     // so metadata reflects the selected environment's backend.
@@ -184,6 +186,7 @@ impl TurnMetadataState {
             subagent_header: subagent_header_value(session_source),
             subagent_kind: subagent_metadata_kind(session_source),
             thread_source,
+            turn_trigger: OnceLock::new(),
             turn_id,
             sandbox,
             sandbox_mode,
@@ -297,6 +300,13 @@ impl TurnMetadataState {
         let _ = self.root_turn_id.set(root_turn_id);
     }
 
+    pub(crate) fn set_turn_trigger(&self, turn_trigger: String) {
+        if turn_trigger.trim().is_empty() {
+            return;
+        }
+        let _ = self.turn_trigger.set(turn_trigger);
+    }
+
     pub(crate) fn root_turn_id(&self) -> Option<String> {
         self.root_turn_id
             .get()
@@ -390,6 +400,7 @@ impl TurnMetadataState {
             subagent_header: self.subagent_header.clone(),
             subagent_kind: self.subagent_kind.clone(),
             thread_source: self.thread_source.clone(),
+            turn_trigger: self.turn_trigger.get().cloned(),
             sandbox: self.sandbox.clone(),
             sandbox_mode: self.sandbox_mode.clone(),
             auto_review_enabled: Some(self.auto_review_enabled),

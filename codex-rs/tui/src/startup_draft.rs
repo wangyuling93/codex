@@ -304,11 +304,15 @@ impl StartupDraftPump {
                     return Ok(());
                 }
                 TuiEvent::Paste(text) => !text.is_empty(),
-                TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume => {
+                TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume | TuiEvent::FocusGained => {
                     self.pending_paste_newline = Some((started_at, newlines));
                     if self.initial_screen == StartupDraftInitialScreen::Composer {
                         self.draw(tui, screen_size)?;
                     }
+                    return Ok(());
+                }
+                TuiEvent::FocusLost => {
+                    self.pending_paste_newline = Some((started_at, newlines));
                     return Ok(());
                 }
                 TuiEvent::Mouse(_) | TuiEvent::Key(_) => false,
@@ -359,7 +363,8 @@ impl StartupDraftPump {
                 }
             }
             TuiEvent::Mouse(_) => {}
-            TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume => {}
+            TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume | TuiEvent::FocusGained => {}
+            TuiEvent::FocusLost => return Ok(()),
         }
         if self.initial_screen == StartupDraftInitialScreen::Composer {
             self.draw(tui, screen_size)?;

@@ -41,6 +41,7 @@ use crate::image_preparation::unified_image_budget_enabled;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
+use crate::session::step_settings::StepSettings;
 use crate::session::turn_context::TurnEnvironment;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills_load_input_from_config;
@@ -193,7 +194,6 @@ use crate::codex_thread::ThreadConfigSnapshot;
 #[cfg(test)]
 use crate::compact::collect_user_messages;
 use crate::config::Config;
-use crate::config::Constrained;
 use crate::config::ConstraintResult;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::PermissionProfileState;
@@ -229,7 +229,9 @@ mod rollout_budget;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
 pub(crate) mod session;
+mod step_activation;
 pub(crate) mod step_context;
+pub(crate) mod step_settings;
 mod thread_settings;
 pub(crate) mod time_reminder;
 mod token_budget;
@@ -249,6 +251,7 @@ use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
 use self::session::SessionConfiguration;
+use self::session::SessionSettingsCommit;
 pub(crate) use self::session::SessionSettingsUpdate;
 #[cfg(test)]
 use self::turn::AssistantMessageStreamParsers;
@@ -360,6 +363,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::HostSkillsService;
 use codex_tools::ToolName;
@@ -704,14 +708,17 @@ impl Session {
                 config.model_provider.clone(),
                 Some(Arc::clone(&auth_manager)),
             ),
-            collaboration_mode,
-            model_reasoning_summary: config.model_reasoning_summary,
-            service_tier,
+            step_settings: Arc::new(StepSettings {
+                collaboration_mode,
+                reasoning_summary: config.model_reasoning_summary,
+                service_tier,
+                personality: config.personality,
+                approval_policy: config.permissions.approval_policy.clone(),
+                approvals_reviewer: config.approvals_reviewer,
+            }),
+            model_info_overrides: config.to_models_manager_config().into(),
             developer_instructions: config.developer_instructions.clone(),
-            personality: config.personality,
             base_instructions,
-            approval_policy: config.permissions.approval_policy.clone(),
-            approvals_reviewer: config.approvals_reviewer,
             permission_profile_state: session_permission_profile_state_from_config(&config)?,
             allow_login_shell: config.permissions.allow_login_shell,
             shell_environment_policy: config.permissions.shell_environment_policy.clone(),
@@ -881,6 +888,7 @@ impl SessionIo {
     pub(crate) async fn submit_recover_turn(
         &self,
         thread_settings: ThreadSettingsOverrides,
+        start_options: TurnStartOptions,
         trace: Option<W3cTraceContext>,
         turn_id: String,
     ) -> CodexResult<TurnInputSubmission> {
@@ -889,6 +897,7 @@ impl SessionIo {
             id: turn_id,
             op: Op::RecoverTurn {
                 thread_settings,
+                start_options,
                 reply: reply_tx,
             },
             trace,
@@ -1374,7 +1383,7 @@ impl Session {
                     .await;
 
                 // If resuming, warn when the last recorded model differs from the current one.
-                let curr: &str = turn_context.model_info.slug.as_str();
+                let curr: &str = turn_context.model_info().slug.as_str();
                 if let Some(prev) = previous_turn_settings
                     .as_ref()
                     .map(|settings| settings.model.as_str())
@@ -1596,9 +1605,27 @@ impl Session {
     pub(crate) async fn update_settings(
         &self,
         updates: SessionSettingsUpdate,
-    ) -> ConstraintResult<()> {
+    ) -> ConstraintResult<SessionSettingsCommit> {
+        let Some(commit) = self.update_settings_if(updates, |_, _| true).await? else {
+            unreachable!("unconditional settings updates must commit");
+        };
+        Ok(commit)
+    }
+
+    /// Evaluates the caller's synchronous predicate against the current configuration
+    /// and validated candidate under the same state lock used for publication.
+    /// This prevents a stale admission decision. Rejection has no settings or runtime
+    /// effects.
+    ///
+    /// The predicate must be fast and side-effect-free. It must not block, acquire
+    /// other locks, or call back into `Session`.
+    async fn update_settings_if(
+        &self,
+        updates: SessionSettingsUpdate,
+        should_commit: impl FnOnce(&SessionConfiguration, &SessionConfiguration) -> bool + Send,
+    ) -> ConstraintResult<Option<SessionSettingsCommit>> {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
-        let (previous_config, new_config, permission_profile_changed, mcp_inputs_changed) = {
+        let (commit, previous_config, new_config, permission_profile_changed, mcp_inputs_changed) = {
             let mut state = self.state.lock().await;
             let updated = match self.apply_session_settings(&state.session_configuration, &updates)
             {
@@ -1608,6 +1635,10 @@ impl Session {
                     return Err(err);
                 }
             };
+
+            if !should_commit(&state.session_configuration, &updated) {
+                return Ok(None);
+            }
 
             let previous_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
@@ -1635,7 +1666,14 @@ impl Session {
             state.session_configuration = updated;
             let new_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
+            let commit = SessionSettingsCommit {
+                configuration: state.session_configuration.clone(),
+                snapshot: state
+                    .session_configuration
+                    .thread_settings_snapshot(&self.services.turn_environments.selections()),
+            };
             (
+                commit,
                 previous_config,
                 new_config,
                 permission_profile_changed,
@@ -1650,7 +1688,7 @@ impl Session {
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();
         }
-        Ok(())
+        Ok(Some(commit))
     }
 
     pub(crate) async fn preview_settings(
@@ -1735,7 +1773,7 @@ impl Session {
             .clone()
     }
 
-    pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::UserInstructions> {
+    pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::Instructions> {
         self.services.agents_md_manager.user_instructions()
     }
 
@@ -2116,8 +2154,7 @@ impl Session {
                 parent_thread_id,
                 communication,
                 context,
-                /*parent_turn_id*/ None,
-                /*root_turn_id*/ None,
+                TurnStartOptions::default(),
             )
             .await
         {
@@ -3035,7 +3072,7 @@ impl Session {
         let mut items = items.to_vec();
         let image_preparation_mode = if unified_image_budget_enabled(
             &turn_context.config.features,
-            &turn_context.model_info,
+            turn_context.model_info(),
         ) {
             ImagePreparationMode::UnifiedBudget
         } else {
@@ -3168,7 +3205,7 @@ impl Session {
                 .note_recorded_items(&response_items);
             state
                 .history
-                .record_annotated_items(&items, turn_context.model_info.truncation_policy.into());
+                .record_annotated_items(&items, turn_context.model_info().truncation_policy.into());
         }
         for image in image_preparations {
             self.services
@@ -3252,6 +3289,10 @@ impl Session {
         cancellation_token: &CancellationToken,
         required_servers: &[String],
     ) -> CodexResult<Arc<StepContext>> {
+        // Capture once before asynchronous planning; all request consumers
+        // retain this immutable settings version even if the turn is updated.
+        let settings = turn_context.current_settings.load_full();
+        let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
         // Keep selections fixed for the turn while allowing their startup work to finish.
         let environments = turn_context.environments.refresh_readiness();
         self.services
@@ -3320,6 +3361,8 @@ impl Session {
         });
         extension_data.insert(selected_plugins.clone());
         turn_context.extension_data.insert(selected_plugins);
+        // Tool planning still uses the admitted turn. Migrating it to the
+        // captured model is a separate step from diagnostic activation.
         let tool_router = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
@@ -3331,13 +3374,8 @@ impl Session {
         .or_cancel(cancellation_token)
         .await??;
         Ok(Arc::new(StepContext {
-            model_info: Arc::clone(&turn_context.model_info),
-            reasoning_effort: turn_context.reasoning_effort.clone(),
-            reasoning_summary: turn_context.reasoning_summary,
-            service_tier: turn_context.config.service_tier.clone(),
-            approval_policy: turn_context.approval_policy(),
-            approvals_reviewer: turn_context.config.approvals_reviewer,
-            session_telemetry: turn_context.session_telemetry.clone(),
+            settings,
+            session_telemetry,
             turn: turn_context,
             environments,
             selected_capability_roots,
@@ -3365,7 +3403,7 @@ impl Session {
             state.current_time_reminder.note_recorded_items(items);
             state.record_items(
                 items.iter(),
-                turn_context.model_info.truncation_policy.into(),
+                turn_context.model_info().truncation_policy.into(),
             );
         }
         self.persist_rollout_items(&[
@@ -3380,10 +3418,11 @@ impl Session {
 
     async fn maybe_warn_on_server_model_mismatch(
         self: &Arc<Self>,
-        turn_context: &Arc<TurnContext>,
+        step_context: &StepContext,
         server_model: String,
     ) -> bool {
-        let requested_model = turn_context.model_info.slug.clone();
+        let turn_context = &step_context.turn;
+        let requested_model = step_context.settings.model_info.slug.clone();
         let server_model_normalized = server_model.to_ascii_lowercase();
         let requested_model_normalized = requested_model.to_ascii_lowercase();
         if server_model_normalized == requested_model_normalized {
@@ -3509,7 +3548,11 @@ impl Session {
 
     pub(crate) async fn collaboration_mode(&self) -> CollaborationMode {
         let state = self.state.lock().await;
-        state.session_configuration.collaboration_mode.clone()
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .clone()
     }
 
     pub(crate) fn multi_agent_version(&self) -> Option<MultiAgentVersion> {

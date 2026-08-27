@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
@@ -20,6 +19,8 @@ use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::ResponseItem;
+use codex_extension_api::SkillInvocationContributor;
+use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadOriginator;
 use codex_extension_api::ThreadStartInput;
@@ -29,6 +30,7 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
+use codex_history::RolloutItem;
 use codex_login::AgentIdentityAuthPolicy;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
@@ -43,6 +45,11 @@ use serde_json::json;
 
 use super::config::GuardianV2Config;
 use super::config::GuardianV2ReviewScope;
+use super::metrics::REVIEW_FALLBACK_METRIC;
+use super::metrics::TOOL_CALL_LAG_METRIC;
+use super::metrics::record_classification;
+use super::metrics::record_classification_risk;
+use super::metrics::record_fast_decision;
 use super::review_evidence::render_review_evidence;
 use super::sampler::LunaSampler;
 use super::sampler::LunaSamplerConfig;
@@ -50,6 +57,9 @@ use super::sampler::LunaSamplerError;
 use super::sampler::LunaSamplingRequest;
 use super::sampler::MODEL;
 use super::truncation::ClassificationTruncations;
+use super::trusted_skills::TrustedSkillInvocations;
+use super::trusted_skills::TrustedSkillRoots;
+use super::trusted_tools::trusted_tool_context;
 
 struct GuardianAction {
     tool_name: ToolName,
@@ -248,35 +258,12 @@ pub enum StrictReviewReason {
 
 struct GuardianV2Enabled;
 
-// Sampled when the approval contributor evaluates the cached Luna score.
-const TOOL_CALL_LAG_METRIC: &str = "codex.guardian_v2.tool_call_lag";
-const REVIEW_FALLBACK_METRIC: &str = "codex.guardian_v2.review_fallback";
-const CLASSIFICATION_METRIC: &str = "codex.guardian_v2.classification";
-const CLASSIFICATION_DURATION_METRIC: &str = "codex.guardian_v2.classification.duration_ms";
-
 #[derive(Default)]
 struct GuardianV2ScoreProgress {
     latest_tool_call: AtomicUsize,
     latest_scored_tool_call: AtomicUsize,
     latest_failed_tool_call: AtomicUsize,
     metrics: Option<Arc<dyn ExtensionMetrics>>,
-}
-
-fn record_classification(
-    metrics: Option<&dyn ExtensionMetrics>,
-    duration: Duration,
-    outcome: &str,
-) {
-    let Some(metrics) = metrics else {
-        return;
-    };
-    let tags = [("outcome", outcome)];
-    metrics.counter(CLASSIFICATION_METRIC, /*inc*/ 1, &tags);
-    metrics.histogram(
-        CLASSIFICATION_DURATION_METRIC,
-        i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
-        &tags,
-    );
 }
 
 #[derive(Clone)]
@@ -319,7 +306,7 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
             } else {
                 None
             };
-            let sampler = LunaSampler::connect(LunaSamplerConfig {
+            let sampler_config = LunaSamplerConfig {
                 provider: create_model_provider(
                     input.config.model_provider.clone(),
                     Some(Arc::clone(&self.auth_manager)),
@@ -337,35 +324,60 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     .thread_store
                     .get::<ThreadOriginator>()
                     .map(|originator| originator.0.clone()),
+                free_guardian: input.config.free_guardian_enabled(),
                 service_tier: input.config.service_tier.clone(),
                 luna_compaction_hash,
                 metrics: input.extension_metrics.clone(),
-            })
-            .await;
+            };
 
-            match sampler {
-                Ok(sampler) => {
-                    if guardian_config.transcript.include_images {
-                        input
-                            .thread_store
-                            .get_or_init(NodeReplReviewEvidence::default)
-                            .enable_image_capture();
-                    }
-                    input.thread_store.insert(sampler);
-                    input.thread_store.insert(guardian_config);
-                    input.thread_store.insert(GuardianV2ScoreProgress {
-                        metrics: input.extension_metrics.clone(),
-                        ..Default::default()
-                    });
-                    input.thread_store.insert(GuardianReviewEvidence::default());
-                    input.thread_store.insert(GuardianV2Enabled);
-                }
-                Err(error) => self.event_sink.emit_warning(ExtensionWarning {
-                    thread_id,
-                    turn_id: None,
-                    message: format!("Guardian V2 Luna initialization failed: {error}"),
-                }),
+            if guardian_config.transcript.include_images {
+                input
+                    .thread_store
+                    .get_or_init(NodeReplReviewEvidence::default)
+                    .enable_image_capture();
             }
+            input.thread_store.remove::<LunaSampler>();
+            let sampler = input
+                .thread_store
+                .get_or_init(|| LunaSampler::new(sampler_config));
+            input.thread_store.insert(guardian_config);
+            input.thread_store.insert(GuardianV2ScoreProgress {
+                metrics: input.extension_metrics.clone(),
+                ..Default::default()
+            });
+            input.thread_store.insert(GuardianReviewEvidence::default());
+            input
+                .thread_store
+                .insert(TrustedSkillRoots::from_config(input.config));
+            input.thread_store.insert(GuardianV2Enabled);
+
+            tokio::spawn(async move {
+                sampler.prewarm().await;
+            });
+        })
+    }
+}
+
+impl SkillInvocationContributor for GuardianV2Extension {
+    fn requires_host_skill_discovery(&self) -> bool {
+        false
+    }
+
+    fn on_skill_invocation<'a>(
+        &'a self,
+        input: SkillInvocationInput<'a>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(roots) = input.thread_store.get::<TrustedSkillRoots>() else {
+                return;
+            };
+            let Some(skill_path) = roots.trusted_skill_path(input.skill_resource) else {
+                return;
+            };
+            input
+                .turn_store
+                .get_or_init(TrustedSkillInvocations::default)
+                .record(skill_path);
         })
     }
 }
@@ -382,17 +394,24 @@ impl ApprovalReviewContributor for GuardianV2Extension {
             thread_store.get::<GuardianV2Enabled>()?;
             let guardian_config = thread_store.get::<GuardianV2Config>()?;
             if guardian_config.review_scope == GuardianV2ReviewScope::ComputerUseOnly {
-                let action = serde_json::from_str::<serde_json::Value>(prompt).ok()?;
+                let Ok(action) = serde_json::from_str::<serde_json::Value>(prompt) else {
+                    record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
+                    return None;
+                };
                 if action.get("tool").and_then(serde_json::Value::as_str) != Some("mcp_tool_call")
                     || !action
                         .get("server")
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(is_node_repl_backed_server)
                 {
+                    record_fast_decision(extension_metrics.as_deref(), "deferred", "out_of_scope");
                     return None;
                 }
             }
-            let score_progress = thread_store.get::<GuardianV2ScoreProgress>()?;
+            let Some(score_progress) = thread_store.get::<GuardianV2ScoreProgress>() else {
+                record_fast_decision(extension_metrics.as_deref(), "deferred", "missing_score");
+                return None;
+            };
             let latest_scored_tool_call = score_progress
                 .latest_scored_tool_call
                 .load(Ordering::Acquire);
@@ -416,6 +435,7 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                         &[("fallback_reason", "score_lag")],
                     );
                 }
+                record_fast_decision(extension_metrics.as_deref(), "deferred", "stale_score");
                 return None;
             }
             if score_progress
@@ -424,17 +444,26 @@ impl ApprovalReviewContributor for GuardianV2Extension {
                 > latest_scored_tool_call
             {
                 thread_store.insert(StrictReviewReason::ElevatedRisk);
+                record_fast_decision(extension_metrics.as_deref(), "deferred", "scoring_failure");
                 return None;
             }
 
-            let score = thread_store
+            let Some(score) = thread_store
                 .get::<SecurityRiskScore>()
-                .and_then(|score| score.scores.get("action_risk").copied())?;
+                .and_then(|score| score.scores.get("action_risk").copied())
+            else {
+                record_fast_decision(extension_metrics.as_deref(), "deferred", "missing_score");
+                return None;
+            };
             if score < guardian_config.review_threshold {
+                record_fast_decision(extension_metrics.as_deref(), "approved", "low_risk");
                 return Some(ReviewDecision::Approved);
             }
             if score >= guardian_config.review_threshold {
                 thread_store.insert(StrictReviewReason::ElevatedRisk);
+                record_fast_decision(extension_metrics.as_deref(), "deferred", "elevated_risk");
+            } else {
+                record_fast_decision(extension_metrics.as_deref(), "deferred", "invalid_score");
             }
             None
         })
@@ -451,6 +480,8 @@ impl GuardianV2Extension {
     fn record_fail_closed_score(thread_store: &ExtensionData, sampled_at: SystemTime) {
         let score = SecurityRiskScore {
             scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+            call_id: None,
+            action: None,
             sampled_at: Some(sampled_at.into()),
         };
         thread_store.insert_if(score.clone(), |previous| {
@@ -521,12 +552,15 @@ impl GuardianV2Extension {
             }
         };
         let parent_model = input.thread_store.get::<ModelInfo>();
-        if parent_model.as_ref().is_some_and(|model| {
-            config
-                .config_layer_stack
-                .requirements()
-                .auto_review_required_for_model(&model.slug)
-        }) {
+        // Computer-use-only scores cannot approve other tools for required models.
+        if guardian_config.review_scope != GuardianV2ReviewScope::ComputerUseOnly
+            && parent_model.as_ref().is_some_and(|model| {
+                config
+                    .config_layer_stack
+                    .requirements()
+                    .auto_review_required_for_model(&model.slug)
+            })
+        {
             input.thread_store.remove::<SecurityRiskScore>();
             return;
         }
@@ -602,6 +636,12 @@ impl GuardianV2Extension {
             return;
         }
         let call_id = input.call_id.to_owned();
+        let mcp_tool = input.mcp_tool.cloned();
+        let trusted_skill_paths = input
+            .turn_store
+            .get::<TrustedSkillInvocations>()
+            .map(|skills| skills.snapshot())
+            .unwrap_or_default();
         let action = GuardianAction {
             tool_name: input.tool_name.clone(),
             payload: input.payload.clone(),
@@ -630,6 +670,12 @@ impl GuardianV2Extension {
 
         tokio::spawn(async move {
             let mut truncations = ClassificationTruncations::default();
+            let trusted_tool_context = match mcp_tool.as_ref() {
+                Some(tool) => {
+                    trusted_tool_context(tool.tool_info(), tool.source(), &manager, &config).await
+                }
+                None => None,
+            };
             let root_snapshot = thread.guardian_root_snapshot().await;
             let root_authorization_version = root_snapshot
                 .as_ref()
@@ -750,6 +796,8 @@ impl GuardianV2Extension {
                     .sample(LunaSamplingRequest {
                         instructions,
                         trusted_review_evidence,
+                        trusted_tool_context,
+                        trusted_skill_paths,
                         input: classification_input,
                         images,
                         parent_compaction,
@@ -770,6 +818,10 @@ impl GuardianV2Extension {
                 };
                 let score = SecurityRiskScore {
                     scores: BTreeMap::from([("action_risk".to_owned(), action_risk)]),
+                    call_id: Some(call_id.clone()),
+                    action: Some(
+                        serde_json::from_str(&planned_action).map_err(|error| error.to_string())?,
+                    ),
                     sampled_at: Some(sampled_at.into()),
                 };
                 let accepted =
@@ -796,6 +848,21 @@ impl GuardianV2Extension {
                     .latest_scored_tool_call
                     .fetch_max(tool_call_index, Ordering::Release);
                 classification_finished_at = Some(Instant::now());
+                record_classification_risk(metrics.as_deref(), output.as_str());
+                if guardian_config.persist_scores
+                    && !config.ephemeral
+                    && let Err(error) = thread
+                        .append_rollout_items(&[RolloutItem::SecurityRiskScore(score)])
+                        .await
+                {
+                    tracing::warn!(
+                        %thread_id,
+                        %turn_id,
+                        %call_id,
+                        %error,
+                        "failed to persist Guardian V2 classification result"
+                    );
+                }
                 Ok("success")
             }
             .await;
@@ -872,6 +939,7 @@ pub fn install(
     });
     registry.thread_lifecycle_contributor(extension.clone());
     registry.approval_review_contributor(extension.clone());
+    registry.skill_invocation_contributor(extension.clone());
     registry.tool_lifecycle_contributor(extension);
 }
 

@@ -5,6 +5,7 @@
 
 mod fs;
 mod history;
+mod models;
 mod rollout_history;
 
 pub(crate) use history::HISTORY_ITEM_PAGE_LIMIT;
@@ -1445,6 +1446,7 @@ impl AppServerSession {
                 params: ThreadShellCommandParams {
                     thread_id: thread_id.to_string(),
                     command,
+                    timeout_ms: None,
                 },
             })
             .await

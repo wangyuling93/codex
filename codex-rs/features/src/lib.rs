@@ -173,6 +173,8 @@ pub enum Feature {
     ExternalAgentMemoryImport,
     /// Compress cold local thread-store rollout files.
     LocalThreadStoreCompression,
+    /// Allow rollout compression on homes used exclusively by compressed-lineage-aware readers.
+    LocalThreadStoreSharedCompression,
     /// Migrate legacy local rollout files to paginated history in the background.
     BackgroundPaginatedRolloutMigration,
     /// Enable the Chronicle sidecar for passive screen-context memories.
@@ -267,6 +269,8 @@ pub enum Feature {
     ExternalMigration,
     /// Enable extension-backed image generation.
     ImageGeneration,
+    /// Omit inline image and audio content from app-server item notifications.
+    OmitAppServerNotificationMedia,
     /// Tell the model when a prompt image was resized and include its dimensions.
     ImageResizeNotice,
     /// Apply one shared pixel and token budget to every image, regardless of legacy detail hints.
@@ -470,6 +474,12 @@ impl Features {
 
     pub fn apps_enabled_for_auth(&self, has_chatgpt_auth: bool) -> bool {
         self.enabled(Feature::Apps) && has_chatgpt_auth
+    }
+
+    pub fn plugin_recommendations_enabled(&self) -> bool {
+        self.enabled(Feature::Apps)
+            && self.enabled(Feature::Plugins)
+            && (self.enabled(Feature::ToolSuggest) || self.enabled(Feature::RecommendedPlugins))
     }
 
     pub fn use_legacy_landlock(&self) -> bool {
@@ -1069,6 +1079,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::LocalThreadStoreSharedCompression,
+        key: "local_thread_store_shared_compression",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::BackgroundPaginatedRolloutMigration,
         key: "background_paginated_rollout_migration",
         stage: Stage::UnderDevelopment,
@@ -1383,6 +1399,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "image_generation",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::OmitAppServerNotificationMedia,
+        key: "omit_app_server_notification_media",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ImageResizeNotice,

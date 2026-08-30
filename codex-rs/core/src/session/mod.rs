@@ -3305,12 +3305,28 @@ impl Session {
         Ok(world_state)
     }
 
-    /// Captures one request-scoped view of dynamic state.
+    /// Retains the step captured for execution.
+    pub(crate) async fn set_last_known_step_context(&self, step_context: &Arc<StepContext>) {
+        let turn_state = {
+            let active_turn = self.active_turn.lock().await;
+            active_turn.as_ref().and_then(|active_turn| {
+                active_turn
+                    .task
+                    .as_ref()
+                    .filter(|task| task.turn_context.sub_id == step_context.turn.sub_id)
+                    .map(|_| Arc::clone(&active_turn.turn_state))
+            })
+        };
+        if let Some(turn_state) = turn_state {
+            turn_state.lock().await.last_known_step_context = Some(Arc::clone(step_context));
+        }
+    }
+
+    /// Captures one request-scoped view of dynamic state and retains it for the active turn.
     ///
     /// This may refresh filesystem-derived state. Normal turns should call it only from
     /// `run_turn` and pass the result down; standalone request or history boundaries may capture
-    /// their own step.
-    #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
+    /// their own step. Use speculative capture for a step that may not execute.
     pub(crate) async fn capture_step_context(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
@@ -3325,6 +3341,35 @@ impl Session {
     }
 
     pub(crate) async fn capture_step_context_with_required_mcp_servers(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        cancellation_token: &CancellationToken,
+        required_servers: &[String],
+    ) -> CodexResult<Arc<StepContext>> {
+        let step_context = self
+            .capture_step_context_inner(turn_context, cancellation_token, required_servers)
+            .await?;
+        self.set_last_known_step_context(&step_context).await;
+        Ok(step_context)
+    }
+
+    /// Prepares a candidate step without replacing the active turn's retained context.
+    /// The caller must retain it explicitly if it is selected for execution.
+    async fn capture_speculative_step_context(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        cancellation_token: &CancellationToken,
+    ) -> CodexResult<Arc<StepContext>> {
+        self.capture_step_context_inner(
+            turn_context,
+            cancellation_token,
+            /*required_servers*/ &[],
+        )
+        .await
+    }
+
+    #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
+    async fn capture_step_context_inner(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
@@ -3422,13 +3467,14 @@ impl Session {
         });
         extension_data.insert(selected_plugins.clone());
         turn_context.extension_data.insert(selected_plugins);
-        // Tool planning still uses the admitted turn. Migrating it to the
-        // captured model is a separate step from diagnostic activation.
+        // Tool availability still follows the admitted turn; the async message
+        // description comes from the captured step model.
         let tool_router = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
             // TODO(CDXENT-441): use the step scoped model
             turn_context.model_info(),
+            settings.model_info.model_messages.as_ref(),
             &environments,
             &mcp,
             &extension_data,
@@ -3588,6 +3634,9 @@ impl Session {
                 .map(|id| id.to_string()),
             window_id: Some(metadata.window_ids.window_id.to_string()),
         };
+        // Wait for accepted updates to finish persisting, then keep later updates from
+        // overtaking the current settings snapshot while its checkpoint is written.
+        let _settings_guard = thread_settings::acquire_persistence_lock(self).await;
         // Compaction starts a new history window, so its WorldState baseline must be full.
         let mut world_state_item = None;
         {
@@ -3600,17 +3649,19 @@ impl Session {
             }
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
         // Persist the baseline after the replacement history that established it.
         if let Some(world_state_item) = world_state_item {
-            self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
-                .await;
+            rollout_items.push(RolloutItem::WorldState(world_state_item));
         }
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
         }
+        // The frozen turn context must not override current settings in persisted metadata.
+        rollout_items.push(RolloutItem::EventMsg(
+            thread_settings::applied_event(self).await,
+        ));
+        self.persist_rollout_items(&rollout_items).await;
         {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
@@ -3731,11 +3782,10 @@ impl Session {
             .plugins_manager
             .plugins_for_config(&turn_context.config.plugins_config_input())
             .await;
-        let features = turn_context.config.features.get();
-        let recommended_plugin_candidates = if features.enabled(Feature::Apps)
-            && features.enabled(Feature::Plugins)
-            && (features.enabled(Feature::ToolSuggest)
-                || features.enabled(Feature::RecommendedPlugins))
+        let recommended_plugin_candidates = if turn_context
+            .config
+            .features
+            .plugin_recommendations_enabled()
         {
             let auth = self.services.auth_manager.auth().await;
             let plugins_config = turn_context.config.plugins_config_input();

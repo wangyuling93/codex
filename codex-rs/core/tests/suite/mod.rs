@@ -143,6 +143,7 @@ mod retry_after;
 mod review;
 mod rmcp_client;
 mod rollout_budget;
+mod rollout_compression;
 mod rollout_list_find;
 mod safety_buffering;
 mod safety_check_downgrade;
@@ -172,6 +173,7 @@ mod turn_input_submission;
 mod turn_state;
 mod unified_exec;
 mod unified_exec_process_events;
+mod unified_exec_stdin_approval;
 mod unified_exec_stdin_review_size;
 #[cfg(unix)]
 mod unified_exec_zsh_fork_approvals;

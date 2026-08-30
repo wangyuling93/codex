@@ -227,6 +227,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
                 thread_store,
                 turn_store: &turn_store,
                 turn_id: "turn-1",
+                root_turn_id: None,
                 call_id,
                 tool_name: &tool_name,
                 mcp_tool: None,
@@ -275,6 +276,20 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
             .map(Vec::len)
             .collect::<Vec<_>>(),
         expected_requests
+    );
+    let requests = server
+        .connections()
+        .into_iter()
+        .flatten()
+        .map(|request| request.body_json())
+        .collect::<Vec<_>>();
+    for request in &requests {
+        responses::assert_parent_turn(request, Some("turn-1"))?;
+        responses::assert_root_turn(request, /*expected*/ None)?;
+    }
+    assert_ne!(
+        requests[0]["client_metadata"]["turn_id"],
+        requests[1]["client_metadata"]["turn_id"]
     );
     Ok(())
 }
@@ -439,6 +454,7 @@ async fn sandboxed_shell_classification_respects_review_scope() -> Result<()> {
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "call-2",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -518,6 +534,7 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "ordinary-call",
             tool_name: &ordinary_tool,
             mcp_tool: None,
@@ -952,6 +969,7 @@ async fn sample_configured_conversation_history_with_source(
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: Some("root-turn"),
             call_id: "call-1",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -1027,6 +1045,7 @@ impl GuardianFailureFixture {
                 thread_store,
                 turn_store: &turn_store,
                 turn_id: "turn-1",
+                root_turn_id: None,
                 call_id: "call-1",
                 tool_name: &tool_name,
                 mcp_tool: None,
@@ -1208,6 +1227,7 @@ classifier_instructions = "Predict future violations.\n# Security Policy\n{{ ten
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1246,6 +1266,7 @@ max_classifier_instruction_tokens = 256
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1334,6 +1355,7 @@ max_recent_non_user_entries = 8
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1735,6 +1757,7 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -1872,6 +1895,9 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         .as_str()
         .expect("classifier thread ID");
     assert_ne!(ThreadId::from_string(classifier_thread_id)?, thread_id);
+    let classifier_turn_id = request["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("classifier turn ID");
     let turn_metadata: serde_json::Value = serde_json::from_str(
         request["client_metadata"]["x-codex-turn-metadata"]
             .as_str()
@@ -1883,7 +1909,9 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
             "session_id": request["client_metadata"]["session_id"],
             "thread_id": classifier_thread_id,
             "guardian_classifier_source_thread_id": thread_id.to_string(),
-            "turn_id": "turn-1",
+            "turn_id": classifier_turn_id,
+            "parent_turn_id": "turn-1",
+            "root_turn_id": "root-turn",
             "thread_source": "guardian_classifier",
         })
     );
@@ -1892,7 +1920,8 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         request["client_metadata"]["x-codex-window-id"],
         format!("{classifier_thread_id}:0")
     );
-    assert_eq!(request["client_metadata"]["turn_id"], "turn-1");
+    assert_eq!(request["client_metadata"]["parent_turn_id"], "turn-1");
+    assert_eq!(request["client_metadata"]["root_turn_id"], "root-turn");
     assert_eq!(request["reasoning"]["effort"], "low");
     assert_eq!(request["reasoning"]["context"], "all_turns");
     assert!(request.get("text").is_none());
@@ -1900,6 +1929,7 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -2200,6 +2230,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "protected.md",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2281,6 +2312,7 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "missing.md",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2321,6 +2353,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -2363,6 +2396,7 @@ async fn contributor_preserves_uncapped_classifier_instructions() -> Result<()> 
         request["input"][1],
         json!({
             "type": "message",
+            "id": request["input"][1]["id"],
             "role": "developer",
             "content": [{
                 "type": "input_text",
@@ -2667,6 +2701,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "call-1",
             tool_name: &tool_name,
             mcp_tool: None,
@@ -2737,6 +2772,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
             thread_store,
             turn_store: &turn_store,
             turn_id: "turn-1",
+            root_turn_id: None,
             call_id: "call-2",
             tool_name: &tool_name,
             mcp_tool: None,

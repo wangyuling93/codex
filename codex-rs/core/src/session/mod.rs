@@ -201,6 +201,7 @@ use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
+use crate::context_manager::HistoryReplacement;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
@@ -1313,6 +1314,26 @@ impl Session {
         }
     }
 
+    /// Render the request copy without changing instructions persisted or inherited by forks.
+    pub(crate) async fn get_prompt_base_instructions(&self) -> BaseInstructions {
+        let config = self.get_config().await;
+        let instructions = self.get_base_instructions().await;
+        if !config.update_plan_enabled
+            && config.model_catalog.is_none()
+            && matches!(
+                instructions.provenance,
+                Some(BaseInstructionsProvenance::Model { .. })
+            )
+        {
+            BaseInstructions {
+                text: crate::context::without_update_plan_instructions(&instructions.text),
+                ..instructions
+            }
+        } else {
+            instructions
+        }
+    }
+
     // Merges connector IDs into the session-level explicit connector selection.
     #[tracing::instrument(
         level = "trace",
@@ -1533,7 +1554,11 @@ impl Session {
             .collect();
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(history, reference_context_item);
+            state.replace_annotated_history(
+                history,
+                reference_context_item,
+                HistoryReplacement::Reset,
+            );
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
@@ -3641,7 +3666,11 @@ impl Session {
         let mut world_state_item = None;
         {
             let mut state = self.state.lock().await;
-            state.replace_annotated_history(items, reference_context_item.clone());
+            state.replace_annotated_history(
+                items,
+                reference_context_item.clone(),
+                HistoryReplacement::Compaction,
+            );
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));

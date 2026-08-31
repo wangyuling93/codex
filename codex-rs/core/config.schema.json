@@ -5551,7 +5551,7 @@
       "additionalProperties": false,
       "properties": {
         "enabled": {
-          "default": true,
+          "default": false,
           "type": "boolean"
         }
       },

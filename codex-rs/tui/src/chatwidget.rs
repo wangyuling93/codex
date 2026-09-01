@@ -355,6 +355,7 @@ mod goal_menu;
 mod ide_context;
 use self::ide_context::IdeContextState;
 mod input_queue;
+mod reconnect;
 use self::input_queue::InputQueueState;
 mod input_flow;
 mod input_restore;
@@ -1208,9 +1209,6 @@ impl ChatWidget {
         self.expire_copy_toast();
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
-        if self.bottom_pane.has_active_view() {
-            self.flush_completed_command_activity();
-        }
         self.bottom_pane.pre_draw_tick();
         if let Some(pet) = self.ambient_pet.as_ref() {
             pet.schedule_next_frame();

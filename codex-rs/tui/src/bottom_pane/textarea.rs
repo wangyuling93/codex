@@ -71,6 +71,7 @@ use self::vim_commands::VimAction;
 use self::vim_commands::VimCommandState;
 use self::vim_commands::VimEditTarget;
 use self::vim_commands::VimInsertPosition;
+pub(crate) use self::vim_commands::VimPersistentState;
 
 const WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 
@@ -349,6 +350,9 @@ impl TextArea {
             self.vim_mode = VimMode::Insert;
             self.vim_pending = VimPending::None;
             self.cancel_vim_search();
+            if self.vim_commands.pending_change.is_empty() && !self.vim_commands.replaying {
+                self.start_vim_edit(VimAction::Insert(VimInsertPosition::Cursor));
+            }
         }
     }
 

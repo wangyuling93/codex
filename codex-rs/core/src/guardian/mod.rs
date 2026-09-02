@@ -1,5 +1,6 @@
 //! Guardian review decides whether an `on-request` approval should be granted
 //! automatically instead of shown to the user.
+//! Full Access (`never` approvals with a disabled sandbox) approves without review.
 //!
 //! High-level approach:
 //! 1. Reconstruct a compact transcript that preserves user intent plus the most
@@ -257,8 +258,6 @@ use prompt::GuardianTranscriptCursor;
 use prompt::build_guardian_prompt_items;
 #[cfg(test)]
 use prompt::build_guardian_prompt_items_with_parent_turn;
-#[cfg(test)]
-use prompt::collect_guardian_transcript_entries;
 #[cfg(test)]
 use prompt::guardian_output_schema;
 #[cfg(test)]

@@ -216,6 +216,9 @@ impl TurnRequestProcessor {
             Op::TurnSettings {
                 turn_id: params.turn_id,
                 update: TurnSettingsUpdate {
+                    approvals_reviewer: params
+                        .approvals_reviewer
+                        .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
                     model: params.model,
                     // Match thread/settings/update: public null does not clear effort.
                     effort: params.effort.map(Some),
@@ -1470,6 +1473,8 @@ impl TurnRequestProcessor {
         };
 
         if let Some(mut thread) = stored_thread {
+            let config_snapshot = review_thread.config_snapshot().await;
+            apply_live_model_settings(&mut thread, &config_snapshot);
             thread.session_id = review_thread.session_configured().session_id.to_string();
             self.thread_watch_manager
                 .upsert_thread_silently(&thread.id)

@@ -152,8 +152,7 @@ def verify_source_checkout(source_dir: Path) -> None:
         ).stdout.strip()
     except (FileNotFoundError, subprocess.CalledProcessError):
         raise SystemExit(
-            f"{source_dir}: source must be a Git checkout at "
-            f"{PINNED_SOURCE_COMMIT}"
+            f"{source_dir}: source must be a Git checkout at {PINNED_SOURCE_COMMIT}"
         ) from None
 
     if head != PINNED_SOURCE_COMMIT:
@@ -238,7 +237,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     if args.source_dir is None or args.output is None:
-        parser.error("either --verify PATH, or both --source-dir and --output, are required")
+        parser.error(
+            "either --verify PATH, or both --source-dir and --output, are required"
+        )
 
     if not args.source_dir.is_dir():
         raise SystemExit(f"source directory not found: {args.source_dir}")

@@ -482,8 +482,8 @@ impl App {
     /// Persist prompt text in the local cross-session message history.
     pub(super) fn append_message_history_entry(&self, thread_id: ThreadId, text: String) {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         tokio::spawn(async move {
             if let Err(err) =
@@ -506,8 +506,8 @@ impl App {
         log_id: u64,
     ) -> Result<()> {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -540,8 +540,8 @@ impl App {
         log_id: u64,
     ) -> Result<()> {
         let history_config = codex_message_history::HistoryConfig::new(
-            self.chat_widget.config_ref().codex_home.clone(),
-            &self.chat_widget.config_ref().history,
+            self.local_settings.codex_home.clone(),
+            &self.local_settings.history,
         );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -973,11 +973,10 @@ impl App {
             && let ServerNotification::TurnCompleted(notification) = &notification
         {
             let now = Instant::now();
-            let app_event_tx = self.app_event_tx.clone();
 
             self.recap
                 .note_turn_finished(&notification.turn.status, now);
-            self.recap.schedule_check(thread_id, app_event_tx, now);
+            self.schedule_recap_check(thread_id, now);
         }
         let misalignment_policy_violation =
             match &notification {
@@ -1310,6 +1309,7 @@ impl App {
             self.recap.reset_for_new_thread(Instant::now());
         }
         self.primary_thread_id = Some(thread_id);
+        self.agents_overview.threads.entry(thread_id).or_default();
         self.primary_session_configured = Some(session.clone());
         self.upsert_agent_picker_thread(
             thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
@@ -1340,10 +1340,9 @@ impl App {
                 .send(AppEvent::BeginInitialHistoryReplayBuffer);
         }
         let now = Instant::now();
-        let app_event_tx = self.app_event_tx.clone();
 
         self.recap.seed_from_turns(&turns, now);
-        self.recap.schedule_check(thread_id, app_event_tx, now);
+        self.schedule_recap_check(thread_id, now);
 
         self.chat_widget
             .replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
@@ -1418,6 +1417,7 @@ impl App {
 
         match app_server
             .resume_thread(
+                &self.local_settings,
                 self.config.clone(),
                 thread_id,
                 crate::app_server_session::ResumeModelSettings::PreserveExistingThread,

@@ -29,6 +29,7 @@ pub(super) struct Reconnected {
 pub(super) async fn reconnect(
     target: AppServerTarget,
     config: Config,
+    local_settings: crate::local_settings::LocalSettings,
     thread_id: Option<ThreadId>,
     remote_cwd: Option<PathBuf>,
     task_tools: ThreadToolTransport,
@@ -66,6 +67,7 @@ pub(super) async fn reconnect(
             let thread = if let Some(thread_id) = thread_id {
                 match session
                     .resume_thread(
+                        &local_settings,
                         config.clone(),
                         thread_id,
                         ResumeModelSettings::PreserveExistingThread,
@@ -77,6 +79,18 @@ pub(super) async fn reconnect(
                         if matches!(
                             error.downcast_ref::<TypedRequestError>(),
                             Some(TypedRequestError::Transport { .. })
+                        ) =>
+                    {
+                        return Err(error);
+                    }
+                    // Unloading threads use the same code as unavailable conversations, but
+                    // ordinary resume can reattach once the unload finishes.
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<TypedRequestError>(),
+                            Some(TypedRequestError::Server { method, source })
+                                if method == "thread/resume" && source.code == -32600
+                                    && source.message.starts_with(&format!("thread {thread_id} is closing;"))
                         ) =>
                     {
                         return Err(error);
@@ -126,7 +140,9 @@ impl App {
         }
         // Side conversations can replace the app-wide overrides. Only copy choices
         // that still match this conversation's own cached settings.
-        if let Some(policy) = self.runtime_approval_policy_override
+        if let Some(policy) = self
+            .runtime_approval_policy_override
+            .map(RuntimeApprovalPolicyOverride::policy)
             && policy == cached.approval_policy
         {
             session.approval_policy = policy;
@@ -169,6 +185,12 @@ impl App {
             self.overlay = None;
             self.commit_animation = None;
             self.clear_recap_request(crate::app_event::RecapTrigger::Manual);
+            if let Some(task) = self.agents_overview.refresh_task.take() {
+                task.abort();
+            }
+            self.agents_overview.request_id = None;
+            self.agents_overview.refresh_pending = false;
+            self.agents_overview.refresh_notifications.clear();
             self.reconnect.presentation = if self
                 .chat_widget
                 .selected_index_for_active_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
@@ -176,12 +198,7 @@ impl App {
             {
                 if let Ok(mut state) = self.agents_overview.view_state.lock() {
                     state.connection_notice = Some("Reconnecting — agent list is stale");
-                    if let Some(task) = state.refresh_task.take() {
-                        task.abort();
-                    }
                 }
-                self.agents_overview.request_id = None;
-                self.agents_overview.refresh_pending = false;
                 ReconnectPresentation::Overview
             } else {
                 self.chat_widget
@@ -230,6 +247,7 @@ impl App {
         self.rate_limit_refresh_state.invalidate_recovery();
         session.inherit_task_tool_capabilities(app_server);
         *app_server = session;
+        self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
         self.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
                 &self.app_server_target,
@@ -327,8 +345,7 @@ impl App {
                 self.chat_widget.pause_unavailable_thread();
                 self.chat_widget.add_info_message("This conversation is unavailable. Its cached transcript and draft remain here; input is paused. Open the agent picker or return to the parent to continue.".into(), /*hint*/ None);
             } else {
-                self.recap
-                    .schedule_check(id, self.app_event_tx.clone(), Instant::now());
+                self.schedule_recap_check(id, Instant::now());
             }
         } else {
             self.active_thread_id = None;
@@ -343,11 +360,21 @@ impl App {
             self.replace_chat_widget(ChatWidget::new_with_app_event(init));
             self.chat_widget.restore_reconnected_input(input);
         }
+        // Discover tasks whose notifications were missed, without clearing retained rows.
+        // A hidden overview performs this discovery when it is next opened.
+        self.agents_overview.initialized = false;
         if self.reconnect.presentation == ReconnectPresentation::Overview {
             if let Ok(mut state) = self.agents_overview.view_state.lock() {
                 state.connection_notice = None;
             }
-            let view = self.agents_overview_view(self.agents_overview.threads.clone(), selected);
+            let threads = self
+                .agents_overview
+                .threads
+                .values()
+                .flatten()
+                .cloned()
+                .collect();
+            let view = self.agents_overview_view(threads, selected);
             self.chat_widget.show_bottom_pane_view(Box::new(view));
             self.refresh_agents_overview_threads(app_server);
         }

@@ -8,6 +8,10 @@ mod history;
 mod models;
 mod rollout_history;
 
+#[cfg(test)]
+#[path = "app_server_session/collaboration_catalog_tests.rs"]
+mod collaboration_catalog_tests;
+
 pub(crate) use history::HISTORY_ITEM_PAGE_LIMIT;
 pub(crate) use history::HISTORY_ITEM_SCAN_LIMIT;
 pub(crate) use history::HistoryHydrationScope;
@@ -290,6 +294,7 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) has_chatgpt_account: bool,
     pub(crate) available_models: Vec<ModelPreset>,
+    pub(crate) collaboration_modes: Vec<codex_protocol::config_types::CollaborationModeMask>,
 }
 
 pub(crate) struct AppServerSession {
@@ -560,7 +565,7 @@ impl AppServerSession {
         // requirements together so an uncached model fetch can overlap both config requests.
         let model_request_id = self.next_request_id();
         let requirements_request_id = self.next_request_id();
-        let (models, requirements) = tokio::try_join!(
+        let (models, requirements, collaboration_modes) = tokio::try_join!(
             async {
                 self.client
                     .request_typed::<ModelListResponse>(ClientRequest::ModelList {
@@ -592,6 +597,7 @@ impl AppServerSession {
                         )
                     })
             },
+            async { Ok(crate::collaboration_modes::list(self.request_handle()).await) },
         )?;
         self.managed_new_thread_defaults = requirements
             .requirements
@@ -669,6 +675,7 @@ impl AppServerSession {
             feedback_audience,
             has_chatgpt_account,
             available_models,
+            collaboration_modes,
         })
     }
 
@@ -2420,6 +2427,7 @@ mod tests {
         RateLimitSnapshot {
             limit_id: Some(limit_id.to_string()),
             limit_name: None,
+            normal_model_slug: None,
             primary: Some(codex_app_server_protocol::RateLimitWindow {
                 used_percent: 0,
                 window_duration_mins: Some(10_080),
@@ -2503,6 +2511,7 @@ mod tests {
     #[test]
     fn app_server_rate_limit_snapshots_deduplicates_top_level_limit_from_map() {
         let response = GetAccountRateLimitsResponse {
+            ordinary_usage_allowed: None,
             account_id: None,
             rate_limit_upsell: None,
             rate_limits: rate_limit_snapshot("codex"),
@@ -3684,6 +3693,7 @@ mod tests {
         let read_only_profile = PermissionProfile::read_only();
         let response = ThreadResumeResponse {
             thread: codex_app_server_protocol::Thread {
+                environments: None,
                 id: thread_id.to_string(),
                 extra: None,
                 session_id: ThreadId::new().to_string(),

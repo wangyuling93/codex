@@ -4,6 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::TurnInput;
 use crate::session::session::Session;
+use crate::session::turn::McpStartupRequirements;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
@@ -80,6 +81,7 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
+        let mut mcp_startup_requirements = McpStartupRequirements::default();
         loop {
             // Box the deep run_turn future so RegularTask::run's state-machine layout
             // stays shallow for downstream release builds.
@@ -88,6 +90,7 @@ impl SessionTask for RegularTask {
                     Arc::clone(&sess),
                     Arc::clone(&ctx),
                     next_input,
+                    &mut mcp_startup_requirements,
                     prewarmed_client_session.take(),
                     cancellation_token.child_token(),
                 )

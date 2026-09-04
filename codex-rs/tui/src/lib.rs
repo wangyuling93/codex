@@ -119,10 +119,13 @@ mod collaboration_modes;
 mod color;
 mod config_update;
 pub(crate) mod custom_terminal;
+mod daybreak;
 mod experimental_features;
+mod permission_discovery;
 mod pets;
 mod transparent_background;
 pub use custom_terminal::Terminal;
+mod assistant_directives;
 mod auto_review_denials;
 mod cwd_prompt;
 mod debug_config;
@@ -755,6 +758,7 @@ fn latest_session_lookup_params(
     lookup_mode: LatestSessionLookupMode,
 ) -> ThreadListParams {
     ThreadListParams {
+        originators: None,
         cursor: None,
         limit: Some(1),
         sort_key: Some(AppServerThreadSortKey::UpdatedAt),

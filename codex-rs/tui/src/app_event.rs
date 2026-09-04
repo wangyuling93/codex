@@ -218,6 +218,7 @@ pub(crate) enum RecapTrigger {
 #[derive(Debug)]
 pub(crate) struct AgentsOverviewThreadRefresh {
     pub(crate) threads: std::collections::HashMap<ThreadId, Option<Thread>>,
+    pub(crate) last_messages: std::collections::HashMap<ThreadId, String>,
     pub(crate) recent_seed_complete: bool,
 }
 
@@ -1029,6 +1030,15 @@ pub(crate) enum AppEvent {
     ModelsLoaded {
         request_id: uuid::Uuid,
         result: Result<Vec<ModelPreset>, String>,
+    },
+
+    FetchPermissionProfiles {
+        request_id: uuid::Uuid,
+        thread_cwd: Option<PathBuf>,
+    },
+    PermissionProfilesLoaded {
+        request_id: uuid::Uuid,
+        result: Result<crate::permission_discovery::PermissionDiscovery, String>,
     },
 
     /// Open the reasoning selection popup after picking a model.

@@ -98,6 +98,7 @@ impl ChatWidget {
             pet_http_client.clone(),
         );
         let mut widget = Self {
+            cyber_policy_notice: Default::default(),
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,
@@ -125,6 +126,8 @@ impl ChatWidget {
             has_codex_backend_auth,
             model_catalog,
             model_popup_request_id: None,
+            permission_popup_request_id: None,
+            permission_profiles_menu_opened: false,
             model_popup_model_ids: Vec::new(),
             session_telemetry,
             session_header: SessionHeader::new(header_model),

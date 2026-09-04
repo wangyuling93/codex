@@ -70,7 +70,11 @@ impl App {
             }
             AppEvent::CloseMisalignmentReview => self.chat_widget.show_misalignment_policy_precaution(),
             AppEvent::SkillsListLoaded { ref cwd, .. }
-            | AppEvent::PluginMentionsLoaded { ref cwd, .. }
+                if cwds_differ(cwd, self.config.cwd.as_path()) =>
+            {
+                self.skill_load_warnings.startup_complete = true;
+            }
+            AppEvent::PluginMentionsLoaded { ref cwd, .. }
                 if cwds_differ(cwd, self.config.cwd.as_path()) => {}
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
@@ -1150,6 +1154,7 @@ impl App {
                     result.map_err(|err| color_eyre::eyre::eyre!(err)),
                     "failed to load skills on startup",
                 );
+                self.skill_load_warnings.startup_complete = true;
             }
             AppEvent::StartFileSearch(query) => {
                 self.file_search.on_user_query(query.clone());
@@ -1573,6 +1578,20 @@ impl App {
                     }
                 }
             }
+            AppEvent::FetchPermissionProfiles { request_id, thread_cwd } => {
+                if self.chat_widget.permission_popup_request_is_current(request_id) {
+                    crate::permission_discovery::fetch(
+                        app_server,
+                        request_id,
+                        self.chat_widget.config_ref(),
+                        thread_cwd.as_deref(),
+                        self.app_event_tx.clone(),
+                    );
+                }
+            }
+            AppEvent::PermissionProfilesLoaded { request_id, result } => {
+                self.chat_widget.on_permission_profiles_loaded(request_id, result);
+            }
             AppEvent::FetchModels { request_id } => {
                 if self.chat_widget.model_popup_request_is_current(request_id) {
                     app_server.fetch_models(request_id, self.app_event_tx.clone());
@@ -1614,12 +1633,13 @@ impl App {
                     .await;
 
                 if let Some(default_effort) = default_effort.as_ref()
-                    && let Err(err) = crate::config_update::write_config_batch(
+                    && let Err(err) = self.persist_model_defaults(
                         app_server.request_handle(),
                         crate::config_update::build_model_selection_edits(
                             model.as_str(),
                             Some(default_effort),
                         ),
+                        "default model and reasoning effort",
                     )
                     .await
                 {
@@ -2142,16 +2162,17 @@ impl App {
                 }
             }
             AppEvent::PersistModelSelection { model, effort } => {
-                match crate::config_update::write_config_batch(
+                match self.persist_model_defaults(
                     app_server.request_handle(),
                     crate::config_update::build_model_selection_edits(
                         model.as_str(),
                         effort.as_ref(),
                     ),
+                    "default model and reasoning effort",
                 )
                 .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         let effort_label = effort
                             .as_ref()
                             .map(std::string::ToString::to_string)
@@ -2244,10 +2265,10 @@ impl App {
                 let edits = crate::config_update::build_service_tier_selection_edits(
                     service_tier.as_deref(),
                 );
-                match crate::config_update::write_config_batch(app_server.request_handle(), edits)
+                match self.persist_model_defaults(app_server.request_handle(), edits, "default service tier")
                     .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         let message = if let Some(service_tier) = service_tier {
                             format!("Service tier set to {service_tier}")
                         } else {
@@ -2464,9 +2485,10 @@ impl App {
                 } else {
                     crate::config_update::clear_config_value(key_path)
                 };
-                if let Err(err) = crate::config_update::write_config_batch(
+                if let Err(err) = self.persist_model_defaults(
                     app_server.request_handle(),
                     vec![edit],
+                    "Plan mode reasoning effort",
                 )
                 .await
                 {
@@ -2496,9 +2518,6 @@ impl App {
                         "Failed to save model migration prompt preference: {err}"
                     ));
                 }
-            }
-            AppEvent::OpenApprovalsPopup => {
-                self.chat_widget.open_approvals_popup();
             }
             AppEvent::OpenAgentsOverview => {
                 self.open_agents_overview(app_server);
@@ -2735,8 +2754,12 @@ impl App {
                     self.chat_widget.add_error_message(err);
                 }
             }
-            AppEvent::OpenPermissionsPopup => {
-                self.chat_widget.open_permissions_popup();
+            AppEvent::OpenPermissionsPopup | AppEvent::OpenApprovalsPopup => {
+                if app_server.uses_remote_workspace() {
+                    self.chat_widget.request_permission_profiles();
+                } else {
+                    self.chat_widget.open_approvals_popup();
+                }
             }
             AppEvent::OpenReviewBranchPicker(cwd) => {
                 self.chat_widget.show_review_branch_picker(&cwd).await;
@@ -2961,9 +2984,11 @@ impl App {
             } => {
                 self.apply_keymap_capture(context, action, key, intent)
                     .await;
+                self.merge_startup_warnings(tui, &history_cell::StartupWarningsCell::default());
             }
             AppEvent::KeymapCleared { context, action } => {
                 self.apply_keymap_clear(context, action).await;
+                self.merge_startup_warnings(tui, &history_cell::StartupWarningsCell::default());
             }
             AppEvent::GenerateRecap { thread_id } => {
                 if self.current_displayed_thread_id() == Some(thread_id) {

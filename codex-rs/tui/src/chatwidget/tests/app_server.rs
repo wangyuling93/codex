@@ -936,6 +936,29 @@ async fn live_app_server_strict_review_required_notification_renders_message() {
 }
 
 #[tokio::test]
+async fn config_warning_during_turn_remains_inline() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    handle_turn_started(&mut chat, "turn-1");
+    chat.handle_server_notification(
+        ServerNotification::ConfigWarning(ConfigWarningNotification {
+            summary: "Invalid configuration; using defaults.".into(),
+            details: Some("Check the project configuration.".into()),
+            path: None,
+            range: None,
+        }),
+        /*replay_kind*/ None,
+    );
+    let cells = drain_insert_history(&mut rx);
+    insta::assert_snapshot!(
+        "runtime_config_warning",
+        cells
+            .iter()
+            .map(|lines| lines_to_single_string(lines))
+            .collect::<String>()
+    );
+}
+
+#[tokio::test]
 async fn live_app_server_config_warning_prefixes_summary() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
@@ -949,7 +972,7 @@ async fn live_app_server_config_warning_prefixes_summary() {
         /*replay_kind*/ None,
     );
 
-    let cells = drain_insert_history(&mut rx);
+    let cells = drain_insert_history_transcript(&mut rx);
     assert_eq!(cells.len(), 1, "expected one warning history cell");
     let rendered = lines_to_single_string(&cells[0]);
     assert!(
@@ -1619,8 +1642,8 @@ async fn live_app_server_cyber_policy_error_renders_dedicated_notice() {
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
-    assert!(rendered.contains("This content can't be shown"));
-    assert!(rendered.contains("extra caution with cybersecurity requests"));
+    assert!(rendered.contains("This content can’t be shown"));
+    assert!(rendered.contains("We take extra care with some cybersecurity requests"));
     assert!(!rendered.contains("server fallback message"));
     assert!(!chat.bottom_pane.is_task_running());
 }
@@ -1841,4 +1864,28 @@ async fn live_app_server_thread_closed_requests_immediate_exit() {
     );
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::Immediate)));
+}
+
+#[tokio::test]
+async fn permission_discovery_invalidates_on_thread_settings_and_uses_updated_cwd() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.config.explicit_permission_profile_mode = true;
+    for complete in [false, true] {
+        chat.open_permissions_popup();
+        let request_id = chat.permission_popup_request_id.unwrap();
+        if complete {
+            chat.on_permission_profiles_loaded(request_id, Err("disconnected".to_string()));
+        }
+        chat.on_thread_settings_updated(thread_settings_for_test("gpt-5.2", thread_id));
+        chat.on_permission_profiles_loaded(request_id, Err("stale".to_string()));
+        assert!(!chat.bottom_pane.has_active_view());
+    }
+    while rx.try_recv().is_ok() {}
+    chat.open_permissions_popup();
+    let AppEvent::FetchPermissionProfiles { thread_cwd, .. } = rx.try_recv().unwrap() else {
+        panic!("expected discovery")
+    };
+    assert_eq!(thread_cwd, Some(test_path_buf("/tmp/thread-settings")));
 }

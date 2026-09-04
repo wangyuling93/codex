@@ -446,6 +446,7 @@ impl App {
                 (session, turns, false)
             }
         };
+        self.agents_overview.activity.remove(&thread_id);
         let recap_progress =
             if live_attached && let Some(channel) = self.thread_event_channels.remove(&thread_id) {
                 let store = channel.store.lock().await;
@@ -474,6 +475,7 @@ impl App {
     /// This helper copies every known nickname/role from `AgentNavigationState` into the
     /// replacement widget so that replayed collab items render agent names immediately.
     pub(super) fn replace_chat_widget(&mut self, mut chat_widget: ChatWidget) {
+        chat_widget.cyber_policy_notice = self.chat_widget.cyber_policy_notice.clone();
         self.commit_animation = None;
         // Transfer the last-written terminal title to the replacement widget
         // so it knows what OSC title is currently displayed. Without this, the
@@ -701,6 +703,7 @@ impl App {
     pub(super) fn reset_thread_event_state(&mut self) {
         self.abort_all_thread_event_listeners();
         self.thread_event_channels.clear();
+        self.agents_overview.activity.clear();
         self.agent_navigation.clear();
         self.side_threads.clear();
         self.active_thread_id = None;
@@ -799,8 +802,18 @@ impl App {
             }
             Err(err) if self.recover_transport_error(&err) => {}
             Err(err) => {
+                let warnings = self
+                    .transcript_cells
+                    .iter()
+                    .find_map(|cell| {
+                        cell.as_any()
+                            .downcast_ref::<history_cell::StartupWarningsCell>()
+                    })
+                    .filter(|cell| cell.pending_header)
+                    .map(|cell| format!("\n\nStartup warnings:\n{}", cell.messages.join("\n")))
+                    .unwrap_or_default();
                 return Err(color_eyre::eyre::eyre!(
-                    "Failed to start a fresh session through the app server: {err}"
+                    "Failed to start a fresh session through the app server: {err}{warnings}"
                 ));
             }
         }

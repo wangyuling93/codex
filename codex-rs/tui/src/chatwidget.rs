@@ -391,6 +391,7 @@ mod notifications;
 use self::notifications::Notification;
 mod composer_copy;
 use self::composer_copy::CopyToast;
+mod permission_discovery;
 mod permission_popups;
 mod permission_shortcuts;
 mod permissions_menu;
@@ -452,6 +453,7 @@ mod usage;
 mod user_messages;
 mod working_directory;
 use self::user_messages::PendingSteer;
+#[cfg(test)]
 use self::user_messages::PendingSteerCompareKey;
 use self::user_messages::QueueDrain;
 use self::user_messages::QueuedUserMessage;
@@ -559,6 +561,7 @@ pub(crate) enum ExternalEditorState {
 /// (which view gets Ctrl+C), while `ChatWidget` owns process-level decisions such as interrupting
 /// active work, arming the double-press quit shortcut, and requesting shutdown-first exit.
 pub(crate) struct ChatWidget {
+    pub(crate) cyber_policy_notice: crate::daybreak::NoticeCache,
     app_event_tx: AppEventSender,
     codex_op_target: CodexOpTarget,
     bottom_pane: BottomPane,
@@ -579,6 +582,8 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
+    permission_popup_request_id: Option<uuid::Uuid>,
+    permission_profiles_menu_opened: bool,
     model_popup_model_ids: Vec<String>,
     session_telemetry: SessionTelemetry,
     session_header: SessionHeader,
@@ -1307,6 +1312,9 @@ impl ChatWidget {
             self.bottom_pane.set_task_running(/*running*/ true);
         }
         self.review.is_review_mode = true;
+        if !from_replay {
+            self.bottom_pane.ensure_status_indicator();
+        }
         let banner = format!(">> Code review started: {hint} <<");
         self.add_to_history(history_cell::new_review_status_line(banner));
         self.request_redraw();
@@ -1324,7 +1332,12 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_committed_user_message(&mut self, items: &[UserInput], from_replay: bool) {
+    fn on_committed_user_message(
+        &mut self,
+        items: &[UserInput],
+        client_id: Option<&str>,
+        from_replay: bool,
+    ) {
         let display = Self::user_message_display_from_inputs(items);
         if from_replay {
             if self.review.is_review_mode {
@@ -1343,12 +1356,15 @@ impl ChatWidget {
             return;
         }
 
-        let compare_key = Self::pending_steer_compare_key_from_items(items);
         if self
             .input_queue
             .pending_steers
             .front()
-            .is_some_and(|pending| pending.compare_key == compare_key)
+            .is_some_and(|pending| match client_id {
+                Some(client_id) => pending.client_id == client_id,
+                // Older app servers do not echo submission IDs.
+                None => pending.compare_key == Self::pending_steer_compare_key_from_items(items),
+            })
         {
             if let Some(pending) = self.input_queue.pending_steers.pop_front() {
                 self.refresh_pending_input_preview();
@@ -1357,7 +1373,7 @@ impl ChatWidget {
                 self.on_user_message_display(pending_display);
             } else if self.last_rendered_user_message_display.as_ref() != Some(&display) {
                 tracing::warn!(
-                    "pending steer matched compare key but queue was empty when rendering committed user message"
+                    "pending steer matched receipt but queue was empty when rendering committed user message"
                 );
                 self.on_user_message_display(display);
             }
@@ -2017,7 +2033,7 @@ const SIDE_PLACEHOLDER: &str = "Ask a follow-up question";
 
 // Extract the first bold (Markdown) element in the form **...** from `s`.
 // Returns the inner text if found; otherwise `None`.
-fn extract_first_bold(s: &str) -> Option<String> {
+pub(crate) fn extract_first_bold(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut i = 0usize;
     while i + 1 < bytes.len() {

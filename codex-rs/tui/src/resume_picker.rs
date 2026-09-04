@@ -17,7 +17,7 @@ use crate::keymap::RuntimeChordKeymap;
 use crate::keymap::RuntimeKeymap;
 use crate::legacy_core::config::Config;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
-use crate::markdown::append_markdown;
+use crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd as render_assistant;
 use crate::pager_overlay::Overlay;
 use crate::session_resume::resolve_session_thread_id;
 use crate::status::format_directory_display;
@@ -2033,6 +2033,7 @@ fn thread_list_params(
     use_state_db_only: bool,
 ) -> ThreadListParams {
     ThreadListParams {
+        originators: None,
         cursor,
         limit: Some(PAGE_SIZE as u32),
         sort_key: Some(sort_key),
@@ -3221,7 +3222,7 @@ fn render_transcript_preview_lines(
             .into(),
         ],
         Some(TranscriptPreviewState::Loaded(lines)) => {
-            render_conversation_preview_lines(lines, width)
+            render_conversation_preview_lines(lines, width, row.cwd.as_deref())
         }
         None => Vec::new(),
     };
@@ -3271,6 +3272,7 @@ fn render_expanded_session_details(
 fn render_conversation_preview_lines(
     lines: &[TranscriptPreviewLine],
     width: u16,
+    cwd: Option<&Path>,
 ) -> Vec<Line<'static>> {
     if lines.is_empty() {
         return vec![
@@ -3284,7 +3286,7 @@ fn render_conversation_preview_lines(
 
     let mut rendered = Vec::new();
     for line in lines {
-        rendered.extend(render_transcript_content_lines(line, width));
+        rendered.extend(render_transcript_content_lines(line, width, cwd));
     }
     let rendered_len = rendered.len();
     rendered
@@ -3301,7 +3303,11 @@ fn render_conversation_preview_lines(
         .collect()
 }
 
-fn render_transcript_content_lines(line: &TranscriptPreviewLine, width: u16) -> Vec<Line<'static>> {
+fn render_transcript_content_lines(
+    line: &TranscriptPreviewLine,
+    width: u16,
+    cwd: Option<&Path>,
+) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(4) as usize;
     let lines = match line.speaker {
         TranscriptPreviewSpeaker::User => vec![conversation_content_line(
@@ -3309,10 +3315,11 @@ fn render_transcript_content_lines(line: &TranscriptPreviewLine, width: u16) -> 
             conversation_user_style(),
         )],
         TranscriptPreviewSpeaker::Assistant => {
-            let mut lines = Vec::new();
-            append_markdown(
-                &line.text, /*width*/ None, /*cwd*/ None, &mut lines,
-            );
+            let mut lines = render_assistant(&line.text, /*width*/ None, cwd, &|_| false)
+                .lines
+                .into_iter()
+                .map(|line| line.line)
+                .collect::<Vec<_>>();
             for line in &mut lines {
                 *line = conversation_content_line(line.clone(), conversation_assistant_style());
             }
@@ -5552,7 +5559,9 @@ session_picker_view = "dense"
                 },
                 TranscriptPreviewLine {
                     speaker: TranscriptPreviewSpeaker::Assistant,
-                    text: String::from("Here are the *last* few lines."),
+                    text: String::from(
+                        r#"Here are the *last* lines: [docs](https://example.com) :codex-file-citation{path="/tmp/codex/report.xlsx"}."#,
+                    ),
                 },
             ]),
         );
@@ -6337,6 +6346,7 @@ session_picker_view = "dense"
     fn app_server_row_keeps_pathless_threads() {
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
             environments: None,
             id: thread_id.to_string(),
             extra: None,
@@ -6382,6 +6392,7 @@ session_picker_view = "dense"
 
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
             environments: None,
             id: thread_id.to_string(),
             extra: None,
@@ -6467,6 +6478,7 @@ session_picker_view = "dense"
 
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
             environments: None,
             id: thread_id.to_string(),
             extra: None,
@@ -6543,6 +6555,7 @@ session_picker_view = "dense"
 
         let thread_id = ThreadId::new();
         let thread = Thread {
+            originator: None,
             environments: None,
             id: thread_id.to_string(),
             extra: None,

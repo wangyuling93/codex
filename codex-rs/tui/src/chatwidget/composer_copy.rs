@@ -139,7 +139,12 @@ impl ChatWidget {
     }
 
     pub(super) fn copy_composer_text(&mut self, text: &str) {
-        self.copy_composer_text_with(text, crate::clipboard_copy::copy_to_clipboard);
+        self.copy_composer_text_with(text, |text| {
+            crate::clipboard_copy::copy_to_clipboard(
+                text,
+                crate::clipboard_copy::CopyFormat::PlainText,
+            )
+        });
     }
 
     pub(super) fn copy_composer_text_with(

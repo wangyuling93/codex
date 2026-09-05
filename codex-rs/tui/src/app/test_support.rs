@@ -22,6 +22,7 @@ pub(super) async fn make_test_app_with_event_receiver()
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
     let app = App {
+        feature_write_lock: Arc::default(),
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
         app_event_tx,
@@ -68,6 +69,7 @@ pub(super) async fn make_test_app_with_event_receiver()
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
         temporary_structured_requests: HashMap::new(),
+        pending_thread_titles: HashSet::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         agents_overview: Default::default(),

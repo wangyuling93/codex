@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -939,19 +940,22 @@ impl MessageProcessor {
         let rpc_gate = Arc::clone(&session.rpc_gate);
         let processor = Arc::clone(self);
         let span = request_context.span();
+        // Type-erase so release layout of Instrumented<async block> does not
+        // overflow rustc's query depth in downstream crates.
         let request = QueuedInitializedRequest::new(
             rpc_gate,
             async move {
                 let processor_for_request = Arc::clone(&processor);
-                let result = processor_for_request
-                    .handle_initialized_client_request(
-                        connection_request_id,
-                        codex_request,
-                        request_context,
-                        session,
-                        event_stream_ready,
-                    )
-                    .await;
+                let handle_request: Pin<
+                    Box<dyn Future<Output = Result<(), JSONRPCErrorError>> + Send>,
+                > = Box::pin(processor_for_request.handle_initialized_client_request(
+                    connection_request_id,
+                    codex_request,
+                    request_context,
+                    session,
+                    event_stream_ready,
+                ));
+                let result = handle_request.await;
                 if let Err(error) = result {
                     processor.outgoing.send_error(error_request_id, error).await;
                 }

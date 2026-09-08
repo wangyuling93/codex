@@ -76,6 +76,9 @@ use super::mcp_tool::TEST_TOOL_NAME;
 use super::mcp_tool::start_mcp_server;
 use super::mcp_tool::start_mcp_server_with_tools;
 
+#[path = "guardian_sync_session_tests.rs"]
+mod sync_sessions;
+
 #[path = "guardian_v2_history_tests.rs"]
 mod history;
 
@@ -1015,7 +1018,11 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .as_array()
                 .expect("Luna input should be an array")
                 .iter()
-                .filter(|item| item["role"] == "developer")
+                .filter(|item| {
+                    item["role"] == "developer"
+                        && item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                            == json!(["guardian.trusted_tool"])
+                })
                 .filter_map(|item| item["content"].as_array())
                 .flatten()
                 .filter_map(|entry| entry["text"].as_str())

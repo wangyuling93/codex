@@ -3,31 +3,55 @@ source: tui/src/chatwidget/realtime/recording_controls_tests.rs
 expression: "states.join(\"\\n\\n\")"
 ---
 connecting:
-› Ask Codex to do anything
-
-   voice ◌ connecting   /voice stop   /voice mute ctrl+x
+╭──────────────────────────────────────────────────────────────────────────────╮
+│voice ◌ connecting                                                 /voice stop│
+│  mic ▁▁▁▁▁▁  codex ▁▁▁▁▁▁                                                    │
+│                                                                              │
+│ › Ask Codex to do anything                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  status line stays visible
 
 listening:
-› Ask Codex to do anything
-
-   voice ● listening   /voice stop   mic ⠄⠄  codex ⠄⠄   /voice mute ctrl+x
+╭──────────────────────────────────────────────────────────────────────────────╮
+│voice ● listening                                  ctrl+x mute     /voice stop│
+│  mic ▁▁▁▁▁▁  codex ▁▁▁▁▁▁                                                    │
+│                                                                              │
+│ › Ask Codex to do anything                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  status line stays visible
 
 speaking:
-› Ask Codex to do anything
-
-   voice ● speaking   /voice stop   mic ⣿⣿  codex ⣿⣿   /voice mute ctrl+x
+╭──────────────────────────────────────────────────────────────────────────────╮
+│voice ● speaking                                   ctrl+x mute     /voice stop│
+│  mic ▁▁▇▇▇▇  codex ▁▁████                                                    │
+│                                                                              │
+│ › Ask Codex to do anything                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  status line stays visible
 
 muted:
-› Ask Codex to do anything
-
-   voice ◌ muted   /voice stop   mic off  codex ⣿⣿   /voice mute ctrl+x
+╭──────────────────────────────────────────────────────────────────────────────╮
+│voice ◌ muted                                      ctrl+x unmute   /voice stop│
+│  mic ▁▁▁▁▁▁  codex ▁▁▇▇▇▇                                                    │
+│                                                                              │
+│ › Ask Codex to do anything                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  status line stays visible
 
 transcript:
-› Ask Codex to do anything
-
-   voice ● speaking   /voice stop   mic ⣤⣤  codex ⣤⣤   /voice mute ctrl+x
+╭──────────────────────────────────────────────────────────────────────────────╮
+│voice ● speaking                                   ctrl+x mute     /voice stop│
+│  mic ▁▁▄▄▄▄  codex ▁▁▄▄▄▄                                                    │
+│                                                                              │
+│ › Ask Codex to do anything                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  status line stays visible
 
 interrupted:
-› Ask Codex to do anything
-
-   voice ● heard   /voice stop   mic ⣤⣤  codex ⠄⠄   /voice mute ctrl+x
+╭──────────────────────────────────────────────────────────────────────────────╮
+│voice ● heard                                      ctrl+x mute     /voice stop│
+│  mic ▁▁▄▄▄▄  codex ▁▁▄▄▄▄                                                    │
+│                                                                              │
+│ › Ask Codex to do anything                                                   │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  status line stays visible

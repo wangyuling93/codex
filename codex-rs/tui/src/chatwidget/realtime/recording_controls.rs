@@ -18,29 +18,34 @@ impl ChatWidget {
 
         self.realtime_conversation.microphone_muted = muted;
         self.realtime_conversation.microphone_level = 0;
+        self.realtime_conversation.microphone_intensity = 0;
         if muted {
             self.realtime_conversation.microphone_history = VoiceAmplitudeHistory::default();
-            self.realtime_conversation.audio_meter_history.clear();
+            for (microphone, _) in &mut self.realtime_conversation.audio_meter_history {
+                *microphone = 0;
+            }
             self.realtime_conversation.interruption_acknowledged_until = None;
         }
         self.update_realtime_footer();
         self.refresh_terminal_title();
     }
 
-    pub(in crate::chatwidget) fn handle_realtime_microphone_shortcut(
-        &mut self,
-        key_event: KeyEvent,
-    ) -> bool {
+    pub(crate) fn realtime_microphone_shortcut_available(&self) -> bool {
+        (self.realtime_conversation.phase == RealtimeConversationPhase::Active
+            || (self.realtime_conversation.phase == RealtimeConversationPhase::Starting
+                && self.realtime_conversation.handle.is_some()))
+            && self.realtime_conversation.thread_id.is_some()
+            && self.realtime_conversation.thread_id == self.thread_id()
+            && self.bottom_pane.no_modal_or_popup_active()
+    }
+
+    pub(crate) fn handle_realtime_microphone_shortcut(&mut self, key_event: KeyEvent) -> bool {
         if key_event.kind != KeyEventKind::Press
-            || !REALTIME_MICROPHONE_SHORTCUT.is_press(key_event)
-            || self.realtime_conversation.phase != RealtimeConversationPhase::Active
-            || self.realtime_conversation.thread_id.is_none()
-            || self.realtime_conversation.thread_id != self.thread_id()
-            || !self.bottom_pane.no_modal_or_popup_active()
+            || !self.chat_keymap.toggle_voice_mute.is_pressed(key_event)
+            || !self.realtime_microphone_shortcut_available()
         {
             return false;
         }
-
         self.toggle_realtime_microphone();
         true
     }
@@ -78,6 +83,10 @@ impl ChatWidget {
             handle.set_speaker_suppressed(/*suppressed*/ true);
         }
         self.realtime_conversation.speaker_level = 0;
+        self.realtime_conversation.speaker_intensity = 0;
+        for (_, speaker) in &mut self.realtime_conversation.audio_meter_history {
+            *speaker = 0;
+        }
         self.realtime_conversation.speaker_active_until = None;
         self.update_realtime_footer();
     }
@@ -114,48 +123,90 @@ impl ChatWidget {
                 .schedule_frame_in(MICROPHONE_METER_INTERVAL);
             return;
         }
-        let microphone_level = if self.realtime_conversation.microphone_muted {
+        let handle = handle.clone();
+        self.refresh_realtime_audio_meters(Instant::now(), || {
+            (handle.take_microphone_peak(), handle.take_speaker_peak())
+        });
+    }
+
+    pub(super) fn refresh_realtime_audio_meters(
+        &mut self,
+        now: Instant,
+        take_peaks: impl FnOnce() -> (u16, u16),
+    ) {
+        // Redraws are not sampling ticks: updating the footer itself requests a redraw.
+        // Leave the peaks untouched until a full sampling interval has elapsed.
+        if let Some(next_sample_at) = self.realtime_conversation.next_audio_meter_sample_at
+            && now < next_sample_at
+        {
+            self.frame_requester.schedule_frame_in(next_sample_at - now);
+            return;
+        }
+        self.realtime_conversation.next_audio_meter_sample_at =
+            Some(now + MICROPHONE_METER_INTERVAL);
+        let (microphone_peak, speaker_peak) = take_peaks();
+        let microphone_peak = if self.realtime_conversation.microphone_muted {
             0
         } else {
-            audio_meter_level(handle.take_microphone_peak())
+            microphone_peak
         };
-        let speaker_level = audio_meter_level(handle.take_speaker_peak());
+        let microphone_level = audio_meter_level(microphone_peak);
+        let speaker_level = audio_meter_level(speaker_peak);
+        let microphone_intensity = audio_meter_intensity(microphone_peak);
+        let speaker_intensity = audio_meter_intensity(speaker_peak);
         let previous_microphone_history = self.realtime_conversation.microphone_history;
         let previous_speaker_history = self.realtime_conversation.speaker_history;
         let mut changed = self.realtime_conversation.microphone_level != microphone_level
-            || self.realtime_conversation.speaker_level != speaker_level;
+            || self.realtime_conversation.speaker_level != speaker_level
+            || self.realtime_conversation.microphone_intensity != microphone_intensity
+            || self.realtime_conversation.speaker_intensity != speaker_intensity;
         if speaker_level > 0 {
-            self.realtime_conversation.speaker_active_until =
-                Some(Instant::now() + SPEAKER_ACTIVITY_HOLD);
+            self.realtime_conversation.speaker_active_until = Some(now + SPEAKER_ACTIVITY_HOLD);
         } else {
             changed |= self
                 .realtime_conversation
                 .speaker_active_until
-                .take_if(|deadline| *deadline <= Instant::now())
+                .take_if(|deadline| *deadline <= now)
                 .is_some();
         }
         changed |= self
             .realtime_conversation
             .interruption_acknowledged_until
-            .take_if(|deadline| *deadline <= Instant::now())
+            .take_if(|deadline| *deadline <= now)
             .is_some();
         self.realtime_conversation.microphone_level = microphone_level;
         self.realtime_conversation.speaker_level = speaker_level;
+        self.realtime_conversation.microphone_intensity = microphone_intensity;
+        self.realtime_conversation.speaker_intensity = speaker_intensity;
         self.realtime_conversation
             .microphone_history
             .push(microphone_level);
         self.realtime_conversation
             .speaker_history
             .push(speaker_level);
+        let had_meter_activity = self
+            .realtime_conversation
+            .audio_meter_history
+            .iter()
+            .any(|(microphone, speaker)| *microphone > 0 || *speaker > 0);
+        // Release a quiet channel instead of waiting for old peaks to scroll out.
+        for (microphone, speaker) in &mut self.realtime_conversation.audio_meter_history {
+            if microphone_intensity == 0 {
+                *microphone = 0;
+            }
+            if speaker_intensity == 0 {
+                *speaker = 0;
+            }
+        }
         if self.realtime_conversation.audio_meter_history.len() >= MAX_REALTIME_AUDIO_METER_FRAMES {
             self.realtime_conversation.audio_meter_history.pop_front();
         }
-        self.realtime_conversation.audio_meter_history.push_back((
-            self.realtime_conversation.microphone_history,
-            self.realtime_conversation.speaker_history,
-        ));
+        self.realtime_conversation
+            .audio_meter_history
+            .push_back((microphone_intensity, speaker_intensity));
         changed |= previous_microphone_history != self.realtime_conversation.microphone_history
-            || previous_speaker_history != self.realtime_conversation.speaker_history;
+            || previous_speaker_history != self.realtime_conversation.speaker_history
+            || had_meter_activity;
         if changed {
             self.update_realtime_footer();
         }
@@ -163,46 +214,73 @@ impl ChatWidget {
             .schedule_frame_in(MICROPHONE_METER_INTERVAL);
     }
 
-    pub(super) fn update_realtime_footer(&mut self) {
-        let status = if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
-            "◌ connecting"
+    pub(in crate::chatwidget) fn update_realtime_footer(&mut self) {
+        let microphone_live = self.realtime_microphone_is_listening();
+        let active = self.realtime_conversation.phase == RealtimeConversationPhase::Active;
+        if !matches!(
+            self.realtime_conversation.phase,
+            RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
+        ) || self.realtime_conversation.thread_id != self.thread_id()
+        {
+            self.bottom_pane.set_voice_strip(/*state*/ None);
+            return;
+        }
+
+        let activity = if self.realtime_conversation.phase == RealtimeConversationPhase::Starting {
+            "connecting"
         } else if self.realtime_conversation.microphone_muted {
-            "◌ muted"
+            "muted"
         } else if self
             .realtime_conversation
             .interruption_acknowledged_until
             .is_some_and(|deadline| deadline > Instant::now())
         {
-            "● heard"
+            "heard"
         } else if self.realtime_conversation.speaker_level > 0
             || self
                 .realtime_conversation
                 .speaker_active_until
                 .is_some_and(|deadline| deadline > Instant::now())
         {
-            "● speaking"
+            "speaking"
         } else {
-            "● listening"
+            "listening"
         };
-        let mut hints = vec![
-            ("voice".to_string(), status.to_string()),
-            ("/voice".to_string(), "stop".to_string()),
-        ];
-        if self.realtime_conversation.phase == RealtimeConversationPhase::Active {
-            let microphone = if self.realtime_conversation.microphone_muted {
-                "off".to_string()
+        self.bottom_pane.set_voice_strip(Some(VoiceStripState {
+            mute_hint: self.chat_keymap.voice_mute_hint(),
+            phase: if active {
+                VoiceStripPhase::Active
             } else {
-                audio_meter_braille(self.realtime_conversation.microphone_history)
-            };
-            let speaker = audio_meter_braille(self.realtime_conversation.speaker_history);
-            hints.push(("mic".to_string(), format!("{microphone}  codex {speaker}")));
-        }
-        let mute_shortcut = REALTIME_MICROPHONE_SHORTCUT
-            .display_label()
-            .replace(" + ", "+");
-        hints.push(("/voice".to_string(), format!("mute {mute_shortcut}")));
-        self.set_footer_hint_override(Some(hints));
+                VoiceStripPhase::Connecting
+            },
+            microphone_live,
+            microphone_muted: self.realtime_conversation.microphone_muted,
+            microphone_history: self
+                .realtime_conversation
+                .audio_meter_history
+                .iter()
+                .map(|(microphone, _)| *microphone)
+                .collect(),
+            speaker_history: self
+                .realtime_conversation
+                .audio_meter_history
+                .iter()
+                .map(|(_, speaker)| *speaker)
+                .collect(),
+            activity,
+            animations: self.config.animations,
+        }));
     }
+}
+
+pub(super) fn audio_meter_intensity(peak: u16) -> u8 {
+    let intensity = usize::from(peak.saturating_sub(AUDIO_METER_NOISE_FLOOR))
+        .saturating_mul(usize::from(u8::MAX))
+        .div_ceil(usize::from(
+            AUDIO_METER_FULL_SCALE - AUDIO_METER_NOISE_FLOOR,
+        ))
+        .min(usize::from(u8::MAX));
+    u8::try_from(intensity).unwrap_or(u8::MAX)
 }
 
 pub(super) fn audio_meter_level(peak: u16) -> usize {
@@ -212,12 +290,4 @@ pub(super) fn audio_meter_level(peak: u16) -> usize {
             AUDIO_METER_FULL_SCALE - AUDIO_METER_NOISE_FLOOR,
         ))
         .min(AUDIO_METER_SEGMENTS)
-}
-
-fn audio_meter_braille(samples: VoiceAmplitudeHistory) -> String {
-    if samples.peak() == 0 {
-        "⠄⠄".to_string()
-    } else {
-        samples.glyphs()
-    }
 }

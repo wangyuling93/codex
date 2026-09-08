@@ -16,9 +16,9 @@ pub(super) const PAD: u16 = 1;
 const LEFT_CHROME: u16 = FRAME + PAD + LIVE_PREFIX_COLS;
 const RIGHT_CHROME: u16 = PAD + FRAME;
 
-pub(super) fn content_insets() -> Insets {
+pub(super) fn content_insets_with_top_extra(extra: u16) -> Insets {
     Insets::tlbr(
-        /*top*/ FRAME,
+        FRAME.saturating_add(extra),
         LEFT_CHROME,
         /*bottom*/ FRAME,
         RIGHT_CHROME,

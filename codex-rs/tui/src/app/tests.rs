@@ -8866,8 +8866,8 @@ async fn selecting_cyber_model_defaults_active_thread_to_auto_review() {
             .try_list_models()
             .expect("model catalog")
             .into_iter()
-            .find(|model| model.model == "gpt-5.4")
-            .expect("gpt-5.4 model");
+            .find(|model| model.model == "gpt-5.5")
+            .expect("gpt-5.5 model");
         model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
         app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
 
@@ -8904,7 +8904,7 @@ async fn selecting_cyber_model_defaults_active_thread_to_auto_review() {
             &mut tui,
             &mut app_server,
             AppEvent::ApplyAdvancedReasoning {
-                model: "gpt-5.4".to_string(),
+                model: "gpt-5.5".to_string(),
                 effort: ReasoningEffortConfig::High,
             },
         )
@@ -8915,7 +8915,7 @@ async fn selecting_cyber_model_defaults_active_thread_to_auto_review() {
         app.handle_event(
             &mut tui,
             &mut app_server,
-            AppEvent::UpdateModel("gpt-5.4".to_string()),
+            AppEvent::UpdateModel("gpt-5.5".to_string()),
         )
         .await
         .expect("model selection should succeed");
@@ -9063,8 +9063,8 @@ async fn selecting_cyber_model_falls_back_to_user_when_auto_review_is_unavailabl
         .try_list_models()
         .expect("model catalog")
         .into_iter()
-        .find(|model| model.model == "gpt-5.4")
-        .expect("gpt-5.4 model");
+        .find(|model| model.model == "gpt-5.5")
+        .expect("gpt-5.5 model");
     model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
     app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
     let _ = app.config.features.disable(Feature::GuardianApproval);
@@ -9073,7 +9073,7 @@ async fn selecting_cyber_model_falls_back_to_user_when_auto_review_is_unavailabl
     app.active_thread_id = Some(ThreadId::new());
 
     let params = app
-        .active_thread_model_setting_update_params("gpt-5.4".to_string())
+        .active_thread_model_setting_update_params("gpt-5.5".to_string())
         .expect("active thread should produce update params");
 
     assert_eq!(
@@ -9118,8 +9118,8 @@ async fn selecting_cyber_model_respects_auto_review_requirements() {
             .try_list_models()
             .expect("model catalog")
             .into_iter()
-            .find(|model| model.model == "gpt-5.4")
-            .expect("gpt-5.4 model");
+            .find(|model| model.model == "gpt-5.5")
+            .expect("gpt-5.5 model");
         model.model_specialty = Some(MODEL_SPECIALTY_CYBER.to_string());
         app.model_catalog = Arc::new(ModelCatalog::new(vec![model]));
 
@@ -9144,7 +9144,7 @@ async fn selecting_cyber_model_respects_auto_review_requirements() {
         app.handle_event(
             &mut tui,
             &mut app_server,
-            AppEvent::UpdateModel("gpt-5.4".to_string()),
+            AppEvent::UpdateModel("gpt-5.5".to_string()),
         )
         .await
         .expect("model selection should succeed");

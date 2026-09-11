@@ -401,8 +401,13 @@ async fn overview_composer_preserves_editing_and_routes_focus() {
         .await
         .unwrap();
     app.cli_kv_overrides = vec![("model".into(), toml::Value::Integer(1))];
-    app.dispatch_agents_overview_task(&mut server, "retry me".into(), Some(app.config.cwd.clone()))
-        .await;
+    app.dispatch_agents_overview_task(
+        &mut crate::tui::test_support::make_test_tui().expect("test tui"),
+        &mut server,
+        "retry me".into(),
+        Some(app.config.cwd.clone()),
+    )
+    .await;
     view.handle_paste(" later".into());
     app.submit_agents_overview_prompt(&server, thread_id, "older failure".into(), Vec::new())
         .await;
@@ -711,6 +716,7 @@ async fn shared_overview_keeps_rows_and_replays_changes_over_stale_reads() -> Re
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     let mut ids = Vec::new();
     for day in 1..=22 {
         let source = match day {
@@ -856,6 +862,12 @@ async fn shared_overview_seeds_once_and_retains_locally_resumed_history() -> Res
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"session\"\n",
     )?;
+    crate::legacy_core::config::set_project_trust_level(
+        app.config.codex_home.as_path(),
+        &test_path_buf("/"),
+        codex_protocol::config_types::TrustLevel::Trusted,
+    )
+    .map_err(std::io::Error::other)?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     Box::pin(app.select_agents_overview_thread(&mut tui, &mut app_server, ids[2])).await?;
     assert_eq!(app.primary_thread_id, Some(ids[2]));
@@ -1093,6 +1105,105 @@ fn reasoning_delta(thread_id: ThreadId, item_id: &str, delta: &str) -> ServerNot
 }
 
 #[tokio::test]
+async fn agents_overview_details_render_markdown() {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    let mut thread = overview_thread(
+        thread_id,
+        /*parent_thread_id*/ None,
+        "Review parser",
+        ThreadStatus::Idle,
+    );
+    thread.preview = "Review **parser** and `token` handling.".into();
+    app.agents_overview
+        .threads
+        .insert(thread_id, Some(thread.clone()));
+    let message = "## Findings\n\n- Fixed **parsing** and `tokens` with a long explanation that wraps.\n- Kept *compatibility*.\n\n```rust\nlet token = 1;\n```";
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        super::super::agents_overview_details::preview_markdown(message),
+    );
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
+    let mut terminal = Terminal::new(TestBackend::new(/*width*/ 96, /*height*/ 40)).unwrap();
+    terminal
+        .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+        .unwrap();
+    let cached = terminal.backend().to_string();
+    let project = test_path_display("/tmp/project");
+    let padding = " ".repeat(project.len().saturating_sub("/tmp/project".len()));
+    insta::assert_snapshot!(
+        "agents_overview_markdown",
+        cached
+            .replace(
+                &format!("{project}  1"),
+                &format!("/tmp/project  1{padding}")
+            )
+            .replace(&project, &format!("/tmp/project{padding}"))
+    );
+
+    app.agents_overview.last_messages.clear();
+    app.track_agents_overview_activity(
+        thread_id,
+        &ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: thread.id.clone(),
+            turn_id: "turn".into(),
+            completed_at_ms: 0,
+            item: ThreadItem::AgentMessage {
+                id: "answer".into(),
+                text: message.into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+        }),
+    );
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
+    terminal
+        .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+        .unwrap();
+    assert_eq!(terminal.backend().to_string(), cached);
+
+    thread.preview = format!("```\n{}\n```", "long prompt ".repeat(25));
+    app.agents_overview.activity.clear();
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        "```\nlet explanation = \"A long code line should wrap inside the task details panel.\";\n```".into(),
+    );
+    let view = app.agents_overview_view(vec![thread.clone()], Some(thread_id));
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    let normalized_group = format!("/tmp/project  1{padding}");
+    insta::assert_snapshot!(
+        "agents_overview_markdown_long_lines",
+        render_bottom_popup(&app.chat_widget, /*width*/ 96)
+            .replace(&format!("{project}  1"), &normalized_group)
+            .replace(&project, "/tmp/project")
+    );
+
+    app.agents_overview.last_messages.insert(
+        thread_id,
+        "```md\n| Check | Result |\n| --- | --- |\n| Parser | Fixed |\n```".into(),
+    );
+    let view = app.agents_overview_view(vec![thread], Some(thread_id));
+    app.chat_widget.show_bottom_pane_view(Box::new(view));
+    insta::assert_snapshot!(
+        "agents_overview_markdown_table",
+        render_bottom_popup(&app.chat_widget, /*width*/ 96)
+            .replace(&format!("{project}  1"), &normalized_group)
+            .replace(&project, "/tmp/project")
+    );
+}
+
+#[test]
+fn agents_overview_markdown_preview_preserves_layout_and_bounds() {
+    let text = format!("a\r\n\t\u{1b}{}", "界".repeat(600));
+    assert_eq!(
+        super::super::agents_overview_details::preview_markdown(&text),
+        format!("a\n\t{}", "界".repeat(509))
+    );
+}
+
+#[tokio::test]
 async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachment() {
     let mut app = make_test_app().await;
     let thread_id = ThreadId::new();
@@ -1160,6 +1271,7 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
     );
     assert!(
         details
+            .lines
             .iter()
             .any(|line| line.to_string().contains("Checking cold-start regressions"))
     );
@@ -1169,10 +1281,8 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
     for delta in [format!("**{}", "界".repeat(10_000)), "**".into()] {
         app.track_agents_overview_notification(&reasoning_delta(thread_id, "oversized", &delta));
     }
-    assert_eq!(
-        app.agents_overview_details(&thread, &HashMap::new()),
-        Vec::<Line>::new()
-    );
+    let details = app.agents_overview_details(&thread, &HashMap::new());
+    assert_eq!((details.lines, details.last_message), (Vec::new(), None));
     app.track_agents_overview_notification(&reasoning_delta(
         thread_id,
         "next",
@@ -1182,10 +1292,8 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
         .get_mut(&thread_id)
         .unwrap()
         .mark_replay_only();
-    assert_eq!(
-        app.agents_overview_details(&thread, &HashMap::new()),
-        Vec::<Line>::new()
-    );
+    let details = app.agents_overview_details(&thread, &HashMap::new());
+    assert_eq!((details.lines, details.last_message), (Vec::new(), None));
     app.track_agents_overview_notification(&ServerNotification::ThreadClosed(
         ThreadClosedNotification {
             thread_id: thread_id.to_string(),
@@ -1617,9 +1725,65 @@ async fn failed_root_switch_keeps_background_requests_on_the_active_session() ->
 }
 
 #[tokio::test]
+async fn root_switch_preserves_vim_line_yank() -> Result<()> {
+    let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
+    std::fs::write(
+        app.local_settings.user_config_path.as_path(),
+        "[tui]\nresume_cwd = \"session\"\n",
+    )?;
+    let mut app_server =
+        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    let previous = app_server.start_thread(&app.config).await?;
+    app.enqueue_primary_thread_session(previous.session, previous.turns)
+        .await?;
+    let target_thread_id = ThreadId::from_string(
+        &app_test_support::create_fake_rollout(
+            app.config.codex_home.as_path(),
+            "2025-01-05T12-00-00",
+            "2025-01-05T12:00:00Z",
+            "Target task",
+            Some(&app.config.model_provider_id),
+            /*git_info*/ None,
+        )
+        .expect("materialize target rollout"),
+    )?;
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("saved line");
+    for code in [KeyCode::Esc, KeyCode::Char('d'), KeyCode::Char('d')] {
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "");
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.select_agents_overview_thread(&mut tui, &mut app_server, target_thread_id)
+        .await?;
+
+    assert_eq!(app.current_displayed_thread_id(), Some(target_thread_id));
+    app.chat_widget.toggle_vim_mode_and_notify();
+    app.chat_widget.insert_str("new line");
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+    assert_eq!(
+        app.chat_widget.composer_text_with_pending(),
+        "new line\nsaved line"
+    );
+    let composer_lines = render_bottom_popup(&app.chat_widget, /*width*/ 80)
+        .lines()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(composer_lines, @"› new line\n  saved line");
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn root_switch_loads_local_preferences_from_disk() -> Result<()> {
     // Keep the large setup and root-switch futures off the test thread's stack.
     let mut app = Box::pin(make_test_app()).await;
+    trust_fixture_folders(&mut app);
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
     ))
@@ -1659,6 +1823,7 @@ async fn root_switch_loads_local_preferences_from_disk() -> Result<()> {
 #[tokio::test]
 async fn root_switch_preserves_idle_root_with_running_subagent() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
     let previous = app_server.start_thread(&app.config).await?;
@@ -1730,6 +1895,7 @@ async fn root_switch_preserves_idle_root_with_running_subagent() -> Result<()> {
 #[tokio::test]
 async fn overview_selection_applies_user_permissions_only_to_unloaded_threads() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"session\"\n",
@@ -1876,6 +2042,7 @@ async fn overview_cold_resume_honors_working_directory_selection() -> Result<()>
         ("session", false, false),
     ] {
         let mut app = make_test_app().await;
+        trust_fixture_folders(&mut app);
         let chosen = app.config.codex_home.join("chosen");
         let overridden = app.config.codex_home.join("overridden");
         std::fs::create_dir(&chosen)?;
@@ -2186,6 +2353,7 @@ async fn resume_failure_keeps_command_center_available() {
 #[tokio::test]
 async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
@@ -2284,6 +2452,7 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
 #[tokio::test]
 async fn command_center_handles_resume_failure_and_success() -> Result<()> {
     let mut app = make_test_app().await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
@@ -2355,6 +2524,7 @@ async fn command_center_handles_resume_failure_and_success() -> Result<()> {
 #[tokio::test]
 async fn command_center_attach_conflict_preserves_selection_and_draft() -> Result<()> {
     let mut app = Box::pin(make_test_app()).await;
+    trust_fixture_folders(&mut app);
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[tui]\nresume_cwd = \"current\"\n",
@@ -2574,3 +2744,14 @@ async fn command_center_action_failures_remain_visible() -> Result<()> {
 }
 #[path = "agents_overview_actions_tests.rs"]
 mod actions;
+
+fn trust_fixture_folders(app: &mut App) {
+    let projects = serde_json::json!({
+        test_path_buf("/").display().to_string(): {"trust_level": "trusted"},
+        app.config.cwd.display().to_string(): {"trust_level": "trusted"},
+    });
+    app.cli_kv_overrides.push((
+        "projects".into(),
+        toml::Value::try_from(projects).expect("trust fixture"),
+    ));
+}

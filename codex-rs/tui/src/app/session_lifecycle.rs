@@ -477,8 +477,8 @@ impl App {
         Ok(live_attached)
     }
 
-    /// Replaces the chat widget and re-seeds the new widget's collab metadata from the navigation
-    /// cache.
+    /// Replaces the chat widget, carrying the editor yank and re-seeding collab metadata from the
+    /// navigation cache.
     ///
     /// Thread switches reconstruct the `ChatWidget`, which loses the `collab_agent_metadata` map.
     /// This helper copies every known nickname/role from `AgentNavigationState` into the
@@ -509,6 +509,7 @@ impl App {
                 entry.agent_role.clone(),
             );
         }
+        chat_widget.restore_kill_buffer_snapshot(self.chat_widget.take_kill_buffer_snapshot());
         self.chat_widget = chat_widget;
         self.sync_active_agent_label();
     }
@@ -1208,9 +1209,6 @@ impl App {
             Ok(config) => config,
             Err(control) => return Ok(control),
         };
-        if self.reject_remote_resume_permission_override(&resume_config) {
-            return Ok(AppRunControl::Continue);
-        }
         let baseline_approval = resume_config.permissions.approval_policy.value();
         let baseline_permissions = RuntimePermissionProfileOverride::from_config(&resume_config);
         self.apply_runtime_policy_overrides(&mut resume_config, RuntimePolicyOverrideScope::All);

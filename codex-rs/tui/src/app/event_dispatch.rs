@@ -2748,7 +2748,7 @@ impl App {
                 }
             }
             AppEvent::DispatchAgentsOverviewTask { prompt, cwd } => {
-                self.dispatch_agents_overview_task(app_server, prompt, cwd)
+                self.dispatch_agents_overview_task(tui, app_server, prompt, cwd)
                     .await;
             }
             AppEvent::RenameAgentsOverviewThread { thread_id, name } => {

@@ -157,7 +157,7 @@ impl App {
                         tx.send(AppEvent::RunAgentsOverviewAction { thread_id, action })
                     })],
                     dismiss_on_select: true,
-                    require_explicit_confirmation: true,
+                    require_explicit_confirmation: action == AgentsOverviewAction::Delete,
                     ..Default::default()
                 },
             ],
